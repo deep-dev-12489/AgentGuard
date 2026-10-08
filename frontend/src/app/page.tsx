@@ -37,6 +37,9 @@ interface LineageNode {
 }
 
 interface SecurityDecision {
+  verdict?: string;
+  reasons?: string[];
+  checks_fired?: string[];
   decision: "ALLOW" | "REVIEW" | "BLOCK";
   tool_name: string;
   tool_args: Record<string, any>;
@@ -48,6 +51,9 @@ interface SecurityDecision {
 }
 
 interface AnalysisResponse {
+  mode?: string;
+  mode_reason?: string;
+  tool_call_source?: string;
   status: string;
   extracted_claims: string[];
   summary: string;
