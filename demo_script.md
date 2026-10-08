@@ -33,13 +33,13 @@
 ## Likely Judge Questions & Honest Answers
 
 ### Q1: Is AgentGuard a prompt wrapper or an out-of-band proxy?
-**Answer**: AgentGuard is an **out-of-band security control plane proxy**. It sits between the LLM agent and external tool APIs. Regardless of what the LLM decides or outputs, no tool call can execute without passing through `GuardedTool.invoke_guarded()`, which evaluates data provenance, context taint, and destination policy.
+**Answer**: AgentGuard is an **in-process security interceptor wrapper** running in the same Python process as the agent. It wraps tool invocations so no registered tool executes without passing through `GuardedTool.invoke_guarded()`, which checks session taint, data provenance, and destination policy.
 
-### Q2: What happens if an attacker tries to piggyback an exfiltration command on a user's export request?
-**Answer**: In AgentGuard, **Information != Authorization**. Even if the user prompt requests an export, any untrusted document chunk present in the context taints the session context (`is_tainted = True`). For `HIGH` or `CRITICAL` risk tools, tainted requests are strictly **`BLOCKED`**, preventing piggybacking attacks.
+### Q2: How does AgentGuard handle piggybacking attacks where an injection tries to trigger an export?
+**Answer**: In AgentGuard, **Information != Authorization**. In unit tests (verified with a mocked LLM), even if the user prompt requests an export, any untrusted document chunk present in the context taints the session context (`is_tainted = True`). For `HIGH` or `CRITICAL` risk tools, tainted requests return `BLOCKED`.
 
 ### Q3: How do you handle fake IDs or mock data?
 **Answer**: All output indicates execution origin. Live LLM function calls are labeled `llm`, scripted fixtures are labeled `scripted_fixture`, and fallback search citations are explicitly tagged `[MOCK DATA]`.
 
 ### Q4: Does AgentGuard provide complete protection against all prompt injections?
-**Answer**: No single security layer provides complete protection against all prompt injections. AgentGuard implements **defense-in-depth**: multi-heuristic injection detectors, taint tracking, fail-closed policy enforcement, SHA-256 approval hashing, and destination allowlists. Note that reported benchmark results were measured on a tuned 15-attack test set, NOT a held-out set (detector was modified after the first run 14/15, attack-05 base64 missed; see results_history.md).
+**Answer**: No single security layer provides complete protection against all prompt injections. AgentGuard implements **defense-in-depth**: multi-heuristic injection detectors, taint tracking, fail-closed policy enforcement, SHA-256 approval hashing, and destination allowlists. Note that reported benchmark results (15/15 attacks flagged) were measured on a tuned test set, NOT a held-out set (detector was modified after the first run 14/15, attack-05 base64 missed; see results_history.md). Live Gemini tool-calling is NOT RUN (429 quota limit exceeded).

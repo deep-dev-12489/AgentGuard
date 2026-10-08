@@ -6,12 +6,23 @@ AgentGuard is a security control plane and runtime interceptor for AI research a
 
 ## Key Features
 
-1. **Guarded Tool Execution (`GuardedTool`)**: Out-of-band security interception for tool execution (`export_customer_data`, `send_email`, `search_academic_db`).
-2. **Data Provenance & Taint Tracking (`SessionContext`)**: Distinguishes trusted user context from untrusted PDF chunks and web data. Tainted contexts automatically block high-risk tool calls.
+1. **Guarded Tool Execution (`GuardedTool`)**: In-process security interception wrapper for tool execution (`export_customer_data`, `send_email`, `search_academic_db`).
+2. **Data Provenance & Taint Tracking (`SessionContext`)**: Distinguishes trusted user context from untrusted PDF chunks and web data. Tainted contexts block high-risk tool calls (unit-tested with mocked LLM).
 3. **Pluggable Multi-Heuristic Detector (`PromptInjectionDetector`)**: Detects role impersonation, system overrides, hidden text markers, base64 blobs, and polite exfiltration phrasing.
 4. **Human-in-the-Loop Approval Queue (`MCPGateway` + SQLite)**: Persists pending approvals in SQLite (`agentguard_audit.db`), enforces SHA-256 argument hash verification, single-use approval tokens, and reviewer authentication.
 5. **Real Free arXiv Search Integration**: Direct integration with arXiv API for academic evidence queries.
 6. **Hardened Upload Pipeline**: Enforces 10MB size limits, `%PDF` header validation, 50-page limits, and per-IP rate limiting.
+
+---
+
+## Measured Implementation Facts
+
+- **Execution Architecture**: Guard runs in the same Python process as the research agent (single process).
+- **Taint Enforcement**: Guard blocks HIGH/CRITICAL tool calls when untrusted content is in context (verified via unit tests with a mocked LLM).
+- **Evaluation Corpus**: 15/15 attacks flagged, 10/10 benign allowed, measured on a tuned test set, NOT a held-out set. First-run benchmark was 14/15 (attack-05 base64 missed; see `results_history.md`).
+- **Claim Extraction**: Document claim verdicts use a keyword heuristic (`verdict_method: keyword_heuristic`).
+- **Live LLM Execution**: Live Gemini tool-calling is NOT RUN (429 quota limit exceeded).
+- **Docker Deployment**: Docker build is NOT RUN (Docker daemon unavailable).
 
 ---
 
@@ -70,7 +81,7 @@ Run     Queue    Execution
    ```
    Open `http://localhost:3000` in your browser.
 
-4. **Docker Execution (One Command)**:
+4. **Docker Execution (Optional Container Build)**:
    ```bash
    docker-compose up --build
    ```
@@ -91,8 +102,9 @@ python evaluate.py
 
 ---
 
-## Known Limitations & Defense-in-Depth Posture
+## Known Limitations & Security Posture
 
+- **Single-Process Scope**: AgentGuard runs as a Python class wrapper within the agent process, not as an isolated container sandbox.
 - **Novel Obfuscation**: Highly sophisticated or previously unknown prompt obfuscations may bypass pattern heuristics; AgentGuard mitigates this by enforcing strict taint-based control flow policies.
 - **Allowed Tools & Destinations**: Requests targeting allowlisted email domains or safe tools pass security checks by design; granular data loss prevention policies should complement transport safety.
-- **Model-Level Jailbreaks**: Direct model alignment failures are countered out-of-band by the deterministic AgentGuard control plane interceptor.
+- **Model-Level Jailbreaks**: Model alignment failures are handled in-process by the AgentGuard policy interceptor.
