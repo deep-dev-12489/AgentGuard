@@ -441,7 +441,7 @@ class ResearchAgent:
                 mode = "simulated"
                 tool_call_source = "scripted_fixture"
                 mode_reason = f"Gemini API call failed ({e}); falling back to simulated mode"
-                claims, tool_name, tool_args, detected_text = self._run_simulated_mode(prompt, document_text, scenario_id="malicious_export" if "export" in document_text.lower() else "safe_search")
+                claims, tool_name, tool_args, detected_text = self._run_simulated_mode(prompt, document_text, scenario_id=scenario_id)
         else:
             mode = "simulated"
             tool_call_source = "scripted_fixture"

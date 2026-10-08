@@ -71,8 +71,7 @@ class RAGPipeline:
             if chunk.is_tainted:
                 continue
                 
-            sentences = [s.strip() for s in re.split(r"[.
-]", chunk.text) if len(s.strip()) > 20]
+            sentences = [s.strip() for s in re.split(r"[.\n]", chunk.text) if len(s.strip()) > 20]
             for s_idx, sentence in enumerate(sentences[:2]):
                 claim_id = f"claim-{idx+1}-{s_idx+1}"
                 
