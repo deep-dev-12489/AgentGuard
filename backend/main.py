@@ -1,64 +1,71 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
-from pydantic import BaseModel
+from typing import Optional, Dict, Any
+from pydantic import BaseModel, Field
+import os
+import time
 
-from agent_logic import AnalysisRequest, AnalysisResponse, ResearchAgent
-from rag_engine import RAGPipeline
-from mcp_gateway import mcp_gateway
+from backend.agent_logic import AnalysisRequest, AnalysisResponse, ResearchAgent
+from backend.rag_engine import RAGPipeline
+from backend.mcp_gateway import mcp_gateway
 
 app = FastAPI(
     title="AgentGuard Security Control Plane API",
-    version="0.2.5",
+    version="0.3.0",
     description="Autonomous AI Research Agent with Built-in Security Control Plane, RAG, and MCP Tool Proxy Gateway."
 )
 
-# Enable CORS for Next.js frontend communication
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "*"
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize engines
 agent = ResearchAgent()
 rag = RAGPipeline()
+
+# Simple Rate Limiter state
+RATE_LIMIT_STORE: Dict[str, list] = {}
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_MAX = 30     # max requests per window
+
+def enforce_rate_limit(client_ip: str):
+    now = time.time()
+    timestamps = RATE_LIMIT_STORE.get(client_ip, [])
+    timestamps = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
+    if len(timestamps) >= RATE_LIMIT_MAX:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded: Max 30 requests per minute.")
+    timestamps.append(now)
+    RATE_LIMIT_STORE[client_ip] = timestamps
 
 class ApprovalDecisionRequest(BaseModel):
     approval_id: str
     approve: bool
+    expected_hash: Optional[str] = None
+    canonical_args: Optional[Dict[str, Any]] = None
 
 @app.get("/health")
 async def health_check():
     return {
         "status": "healthy",
         "service": "AgentGuard Security Control Plane",
-        "version": "0.2.5"
+        "version": "0.3.0"
     }
 
 @app.post("/api/analyze", response_model=AnalysisResponse, summary="Analyze Document Text & Intercept Tools")
-async def analyze_document(request: AnalysisRequest):
-    """
-    Primary API Endpoint for AgentGuard Analysis:
-    1. Reads user prompt and document text.
-    2. Runs Research Agent to extract claims.
-    3. Intercepts any tool calls via AgentGuard Security Control Plane.
-    4. Returns security decision (ALLOW, REVIEW, or BLOCK) and full Action Lineage.
-    """
+async def analyze_document(request: AnalysisRequest, req: Request):
+    client_ip = req.client.host if req.client else "127.0.0.1"
+    enforce_rate_limit(client_ip)
     try:
         response = agent.analyze_document(
             prompt=request.prompt,
             document_text=request.document_text,
+            scenario_id=request.scenario_id,
             force_provenance=request.force_provenance
         )
 
-        # Queue for human approval if decision is REVIEW
         if response.security_decision and response.security_decision.decision.value == "REVIEW":
             approval = mcp_gateway.queue_for_human_review(
                 tool_name=response.security_decision.tool_name,
@@ -73,18 +80,32 @@ async def analyze_document(request: AnalysisRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal AgentGuard Server Error: {str(e)}")
 
-@app.post("/api/upload_and_analyze", response_model=AnalysisResponse, summary="Upload PDF Stream & Run Full Analysis")
+@app.post("/api/upload_and_analyze", response_model=AnalysisResponse, summary="Upload Hardened PDF Analysis")
 async def upload_and_analyze(
+    req: Request,
     file: UploadFile = File(...),
     user_prompt: str = Form("Analyze this uploaded PDF paper and extract research evidence.")
 ):
-    """
-    Upload a binary PDF file stream, parse raw text using pypdf,
-    attach untrusted_pdf provenance tag, and evaluate via AgentGuard.
-    """
+    client_ip = req.client.host if req.client else "127.0.0.1"
+    enforce_rate_limit(client_ip)
+
+    # 1. File Size Limit (10 MB)
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="UPLOAD ERROR: File size exceeds 10MB limit.")
+
+    # 2. PDF Magic Byte Check
+    if not content.startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="UPLOAD ERROR: File is not a valid PDF (missing %PDF header).")
+
     try:
-        content = await file.read()
         chunks = rag.parse_pdf_bytes(content, filename=file.filename)
+        
+        # 3. Page Count Limit Check (50 pages)
+        max_page = max([c.page_number for c in chunks]) if chunks else 0
+        if max_page > 50:
+            raise HTTPException(status_code=400, detail="UPLOAD ERROR: Document exceeds 50 page maximum limit.")
+
         full_text = "\n\n".join([c.text for c in chunks])
 
         response = agent.analyze_document(
@@ -102,23 +123,38 @@ async def upload_and_analyze(
             )
 
         return response
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF Ingestion Analysis Error: {str(e)}")
 
 @app.get("/api/pending_approvals", summary="Get Pending Human Approvals")
 async def get_pending_approvals():
-    """Retrieve list of tool calls currently awaiting human operator approval."""
     return {"pending": mcp_gateway.get_pending_list()}
 
 @app.post("/api/approve", summary="Human Approval Decision Endpoint")
-async def approve_tool_call(request: ApprovalDecisionRequest):
-    """Approve or deny a queued tool call."""
+async def approve_tool_call(
+    request: ApprovalDecisionRequest,
+    x_reviewer_token: Optional[str] = Header(None, alias="X-Reviewer-Token")
+):
+    expected_token = os.getenv("REVIEWER_TOKEN", "secret_reviewer_token_123")
+    if not x_reviewer_token or x_reviewer_token != expected_token:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid or missing X-Reviewer-Token header.")
+
     try:
         if request.approve:
-            result = mcp_gateway.approve_tool_call(request.approval_id)
+            result = mcp_gateway.approve_tool_call(
+                approval_id=request.approval_id,
+                expected_hash=request.expected_hash,
+                canonical_args=request.canonical_args
+            )
         else:
             result = mcp_gateway.reject_tool_call(request.approval_id)
         return {"status": "SUCCESS", "decision": result}
+    except ValueError as e:
+        if "ARGUMENT_TAMPERING" in str(e):
+            raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
