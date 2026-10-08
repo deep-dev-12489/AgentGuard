@@ -114,15 +114,3 @@ class RAGPipeline:
             ))
 
         return claims[:4]
-
-        if not claims:
-            claims.append(ExtractedClaim(
-                claim_id="claim-default",
-                statement="Document processed successfully. No contradictory claims detected.",
-                evidence_text="Full PDF analysis complete.",
-                verdict="SUPPORTED",
-                confidence=0.95,
-                rationale="Baseline verification completed."
-            ))
-
-        return claims[:4]

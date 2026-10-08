@@ -1,11 +1,12 @@
-from dotenv import load_dotenv
-load_dotenv()
 import os
 import re
 import yaml
 from typing import Dict, Any, List, Optional, Callable, Tuple
 from enum import Enum
 from pydantic import BaseModel, Field
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==========================================
 # 1. Enums and Data Models
@@ -60,15 +61,15 @@ class AgentGuardDecision(BaseModel):
     action_lineage: List[LineageNode]
 
 class AnalysisRequest(BaseModel):
-    prompt: str = Field(..., example="Analyze this healthcare research paper and summarize key findings.")
-    document_text: str = Field("", example="AI in diagnosis improves accuracy by 18%.")
+    prompt: str = Field(...)
+    document_text: str = Field("")
     scenario_id: Optional[str] = Field(None, description="Explicit scenario for simulated replay mode: 'safe_search', 'malicious_export', 'user_export', 'mixed_context'")
     force_provenance: Optional[str] = Field(None, description="Override provenance source for testing ('user' or 'untrusted_pdf')")
 
 class AnalysisResponse(BaseModel):
-    mode: str = Field(..., description="'live_llm' or 'simulated'")
+    mode: str = Field(..., description="'live_llm', 'simulated', or 'unavailable'")
     mode_reason: Optional[str] = Field(None, description="Explanation for why mode was chosen")
-    tool_call_source: Optional[str] = Field(None, description="'llm' or 'scripted_fixture'")
+    tool_call_source: Optional[str] = Field(None, description="'llm', 'scripted_fixture', or None")
     status: str
     extracted_claims: List[str]
     summary: str
@@ -350,7 +351,7 @@ GUARDED_TOOL_REGISTRY: Dict[str, GuardedTool] = {
 }
 
 # ==========================================
-# 6. Scenario Fixtures for Explicit Replay
+# 6. Scenario Fixtures for Explicit Replay (No Keyword Matching)
 # ==========================================
 
 SIMULATED_SCENARIOS = {
@@ -417,36 +418,56 @@ class ResearchAgent:
                 is_trusted=is_trusted_doc
             ))
 
-        mode = "simulated"
+        # Wire RAG Engine for Claim Extraction from document text
+        from backend.rag_engine import RAGPipeline
+        rag = RAGPipeline()
+        claims = []
+        if document_text and len(document_text.strip()) > 0:
+            chunks = rag.parse_pdf_bytes(document_text.encode("utf-8", errors="ignore"), "doc.pdf")
+            evidence_claims = rag.retrieve_evidence_for_claims(chunks)
+            claims = [c.statement for c in evidence_claims]
+
+        if not claims:
+            claims = ["No document claims extracted from provided text."]
+
+        mode = "unavailable"
         mode_reason = None
         tool_call_source = None
         tool_name = None
         tool_args = {}
         detected_text = None
-        claims = []
 
-        # 2. Determine Mode & Perform Tool Calling
+        # 2. Determine Mode & Perform Tool Calling (STRICT: NO KEYWORD TRIGGERING)
         if scenario_id and scenario_id in SIMULATED_SCENARIOS:
             mode = "simulated"
             tool_call_source = "scripted_fixture"
             mode_reason = f"Explicit scenario_id '{scenario_id}' selected for replay mode"
-            claims, tool_name, tool_args, detected_text = self._run_simulated_mode(prompt, document_text, scenario_id)
+            fixture = SIMULATED_SCENARIOS[scenario_id]
+            tool_name = fixture["tool"]
+            tool_args = fixture["args_extractor"](document_text)
+            detected_text = fixture.get("detected_text")
 
         elif self.gemini_key:
             try:
-                claims, tool_name, tool_args, detected_text = self._analyze_with_gemini(prompt, document_text)
+                claims_llm, tool_name, tool_args, detected_text = self._analyze_with_gemini(prompt, document_text)
+                if claims_llm and len(document_text.strip()) == 0:
+                    claims = claims_llm
                 mode = "live_llm"
                 tool_call_source = "llm"
             except Exception as e:
-                mode = "simulated"
-                tool_call_source = "scripted_fixture"
-                mode_reason = f"Gemini API call failed ({e}); falling back to simulated mode"
-                claims, tool_name, tool_args, detected_text = self._run_simulated_mode(prompt, document_text, scenario_id=scenario_id)
+                mode = "unavailable"
+                tool_call_source = None
+                mode_reason = f"Gemini API execution unavailable ({e})"
+                tool_name = None
+                tool_args = {}
+                detected_text = None
         else:
-            mode = "simulated"
-            tool_call_source = "scripted_fixture"
-            mode_reason = "GEMINI_API_KEY environment variable is not set"
-            claims, tool_name, tool_args, detected_text = self._run_simulated_mode(prompt, document_text, scenario_id=None)
+            mode = "unavailable"
+            tool_call_source = None
+            mode_reason = "GEMINI_API_KEY environment variable is not set and no explicit scenario_id was provided"
+            tool_name = None
+            tool_args = {}
+            detected_text = None
 
         if not tool_name:
             lineage = [
@@ -557,23 +578,17 @@ class ResearchAgent:
         if response.text:
             claims = [line.strip("- ").strip() for line in response.text.split("\n") if line.strip() and not line.startswith("User")]
         if not claims:
-            claims = ["Document analyzed successfully via Gemini LLM."]
+            claims = ["Document analyzed via Gemini LLM."]
 
         return claims[:3], tool_name, tool_args, detected_text
 
     def _run_simulated_mode(self, prompt: str, document_text: str, scenario_id: Optional[str]) -> Tuple[List[str], Optional[str], Dict[str, Any], Optional[str]]:
-        claims = [
-            "AI in clinical diagnostics improves accuracy by 18%",
-            "Neural verification reduces false positive diagnostic rates",
-            "Cross-validation demonstrates stability across multi-site datasets"
-        ]
-
         if not scenario_id or scenario_id not in SIMULATED_SCENARIOS:
-            return claims, None, {}, None
+            return ["No explicit scenario_id specified."], None, {}, None
 
         fixture = SIMULATED_SCENARIOS[scenario_id]
         tool_name = fixture["tool"]
         tool_args = fixture["args_extractor"](document_text)
         detected_text = fixture.get("detected_text")
 
-        return claims, tool_name, tool_args, detected_text
+        return [], tool_name, tool_args, detected_text
