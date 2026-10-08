@@ -26,13 +26,13 @@
 4. **Observe**:
    - Status returns **`🟡 REVIEW REQUIRED`** (`CRITICAL` risk operation requiring operator authorization).
    - Click **"Approve Execution"**.
-   - Tool executes via the guarded path with SHA-256 integrity verification, returning real execution output.
+   - Tool executes via the guarded path with SHA-256 integrity verification (SQLite reload verified in the same process), returning real execution output.
 
 ---
 
 ## Likely Judge Questions & Honest Answers
 
-### Q1: Is AgentGuard a prompt wrapper or an out-of-band proxy?
+### Q1: Is AgentGuard a prompt wrapper or an in-process interceptor?
 **Answer**: AgentGuard is an **in-process security interceptor wrapper** running in the same Python process as the agent. It wraps tool invocations so no registered tool executes without passing through `GuardedTool.invoke_guarded()`, which checks session taint, data provenance, and destination policy.
 
 ### Q2: How does AgentGuard handle piggybacking attacks where an injection tries to trigger an export?

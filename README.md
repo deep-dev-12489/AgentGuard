@@ -9,7 +9,7 @@ AgentGuard is a security control plane and runtime interceptor for AI research a
 1. **Guarded Tool Execution (`GuardedTool`)**: In-process security interception wrapper for tool execution (`export_customer_data`, `send_email`, `search_academic_db`).
 2. **Data Provenance & Taint Tracking (`SessionContext`)**: Distinguishes trusted user context from untrusted PDF chunks and web data. Tainted contexts block high-risk tool calls (unit-tested with mocked LLM).
 3. **Pluggable Multi-Heuristic Detector (`PromptInjectionDetector`)**: Detects role impersonation, system overrides, hidden text markers, base64 blobs, and polite exfiltration phrasing.
-4. **Human-in-the-Loop Approval Queue (`MCPGateway` + SQLite)**: Persists pending approvals in SQLite (`agentguard_audit.db`), enforces SHA-256 argument hash verification, single-use approval tokens, and reviewer authentication.
+4. **Human-in-the-Loop Approval Queue (`MCPGateway` + SQLite)**: Persists pending approvals in SQLite (`agentguard_audit.db`) (SQLite reload verified in the same process), enforces SHA-256 argument hash verification, single-use approval tokens, and reviewer authentication.
 5. **Real Free arXiv Search Integration**: Direct integration with arXiv API for academic evidence queries.
 6. **Hardened Upload Pipeline**: Enforces 10MB size limits, `%PDF` header validation, 50-page limits, and per-IP rate limiting.
 
