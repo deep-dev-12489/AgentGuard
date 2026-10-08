@@ -1,0 +1,28 @@
+# AgentGuard Security Policy Configuration
+
+tool_risk_levels:
+  export_customer_data: CRITICAL
+  send_email: HIGH
+  search_academic_db: LOW
+
+defaults:
+  unknown_tool_risk: CRITICAL
+  default_verdict: BLOCK
+  bulk_record_threshold: 100
+
+destinations:
+  allowed_email_domains:
+    - org.com
+    - trusted-partner.org
+    - company.com
+  allowed_api_hosts:
+    - api.ncbi.nlm.nih.gov
+    - export.arxiv.org
+    - internal-db.company.com
+
+evaluations:
+  untrusted_context_high_critical: BLOCK
+  untrusted_context_medium: REVIEW
+  untrusted_context_low: ALLOW
+  untainted_critical: REVIEW
+  untainted_allowlisted: ALLOW
