@@ -301,6 +301,15 @@ export default function LakeraLandingPage() {
                 <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-semibold tracking-wider">
                   Runtime Gateway
                 </span>
+                {response && (
+                  <span className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded border font-semibold ${
+                    response.mode === "live_llm"
+                      ? "bg-emerald-950 text-emerald-400 border-emerald-800"
+                      : "bg-amber-950 text-amber-400 border-amber-800"
+                  }`}>
+                    {response.mode === "live_llm" ? "🟢 LIVE LLM" : "🟡 SIMULATED (scripted)"}
+                  </span>
+                )}
               </div>
             </div>
           </div>

@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable, Tuple
 from enum import Enum
 from pydantic import BaseModel, Field
 
@@ -45,6 +45,7 @@ class AnalysisRequest(BaseModel):
     force_provenance: Optional[str] = Field(None, description="Override provenance source for testing ('user' or 'untrusted_pdf')")
 
 class AnalysisResponse(BaseModel):
+    mode: str = Field(..., description="'live_llm' or 'simulated'")
     status: str
     extracted_claims: List[str]
     summary: str
@@ -54,39 +55,74 @@ class AnalysisResponse(BaseModel):
     action_lineage: List[LineageNode]
 
 # ==========================================
-# 2. Mock External Tools (MCP Compatible)
+# 2. Tools & Guarded Tool Registry
 # ==========================================
 
-def export_customer_data(target_email: str, records_count: int = 100) -> str:
-    """
-    Mock external tool that exports customer DB records to a specified destination email.
-    HIGH RISK / CRITICAL TOOL.
-    """
+def raw_export_customer_data(target_email: str, records_count: int = 100) -> str:
+    """Mock external tool to export customer DB records. CRITICAL RISK."""
     return f"SUCCESS: Exported {records_count} customer records to {target_email}."
 
-def search_academic_db(query: str, max_results: int = 3) -> str:
-    """
-    Mock external tool to search PubMed/ArXiv academic databases for medical & AI research citations.
-    SAFE / LOW RISK TOOL.
-    """
+def raw_send_email(target_email: str, subject: str, body: str) -> str:
+    """Mock external tool to send email. HIGH RISK."""
+    return f"SUCCESS: Email sent to {target_email} with subject '{subject}'."
+
+def raw_search_academic_db(query: str, max_results: int = 3) -> str:
+    """Mock external tool to search PubMed/ArXiv databases. LOW RISK."""
     return (
         f"SUCCESS: Retrieved {max_results} academic citations for query '{query}'. "
         f"Citations: [1] PubMed ID:34829102 (AI Clinical Diagnostics 2025), "
         f"[2] ArXiv:2403.0912 (Deep Learning Neural Verification)."
     )
 
-# Tool Metadata Registry
-TOOL_REGISTRY = {
-    "export_customer_data": {
-        "function": export_customer_data,
-        "risk_level": ToolRiskLevel.CRITICAL,
-        "description": "Exports sensitive customer database records to an external target email."
-    },
-    "search_academic_db": {
-        "function": search_academic_db,
-        "risk_level": ToolRiskLevel.LOW,
-        "description": "Searches PubMed/ArXiv academic databases for research evidence."
-    }
+class GuardedTool:
+    """Wrapper ensuring NO tool can execute without passing through AgentGuardInterceptor."""
+    def __init__(self, name: str, risk_level: ToolRiskLevel, description: str, func: Callable):
+        self.name = name
+        self.risk_level = risk_level
+        self.description = description
+        self._raw_func = func
+
+    def invoke_guarded(
+        self,
+        tool_args: Dict[str, Any],
+        provenance_source: str,
+        detected_injection_text: Optional[str] = None
+    ) -> Tuple[AgentGuardDecision, str]:
+        # MANDATORY GUARD INTERCEPTION: No direct calls possible
+        decision = AgentGuardInterceptor.inspect_and_evaluate(
+            tool_name=self.name,
+            tool_args=tool_args,
+            provenance_source=provenance_source,
+            detected_injection_text=detected_injection_text
+        )
+
+        if decision.decision == SecurityDecisionType.ALLOW:
+            result = self._raw_func(**tool_args)
+            return decision, result
+        elif decision.decision == SecurityDecisionType.BLOCK:
+            return decision, "EXECUTION PREVENTED BY AGENTGUARD CONTROL PLANE"
+        else:
+            return decision, "PENDING HUMAN OPERATOR APPROVAL"
+
+GUARDED_TOOL_REGISTRY: Dict[str, GuardedTool] = {
+    "export_customer_data": GuardedTool(
+        name="export_customer_data",
+        risk_level=ToolRiskLevel.CRITICAL,
+        description="Exports customer database records to an external target email.",
+        func=raw_export_customer_data
+    ),
+    "send_email": GuardedTool(
+        name="send_email",
+        risk_level=ToolRiskLevel.HIGH,
+        description="Sends an outbound email to a specified recipient.",
+        func=raw_send_email
+    ),
+    "search_academic_db": GuardedTool(
+        name="search_academic_db",
+        risk_level=ToolRiskLevel.LOW,
+        description="Searches PubMed/ArXiv academic databases for research evidence.",
+        func=raw_search_academic_db
+    )
 }
 
 # ==========================================
@@ -108,11 +144,10 @@ class AgentGuardInterceptor:
         detected_injection_text: Optional[str] = None
     ) -> AgentGuardDecision:
         
-        tool_meta = TOOL_REGISTRY.get(tool_name, {"risk_level": ToolRiskLevel.HIGH})
-        risk_level = tool_meta["risk_level"]
+        guarded_tool = GUARDED_TOOL_REGISTRY.get(tool_name)
+        risk_level = guarded_tool.risk_level if guarded_tool else ToolRiskLevel.HIGH
         
-        # Determine if action is tainted based on provenance source and tool risk
-        is_tainted = (provenance_source == "untrusted_pdf") and (tool_name == "export_customer_data" or risk_level == ToolRiskLevel.CRITICAL)
+        is_tainted = (provenance_source == "untrusted_pdf") and (tool_name == "export_customer_data" or risk_level in [ToolRiskLevel.HIGH, ToolRiskLevel.CRITICAL])
 
         lineage: List[LineageNode] = []
 
@@ -149,8 +184,7 @@ class AgentGuardInterceptor:
             is_tainted=is_tainted
         ))
 
-        # --- SECURITY EVALUATION MATRIX ---
-        # Rule A: Safe Tools (LOW Risk) -> ALLOW
+        # Security Evaluation Rules
         if risk_level == ToolRiskLevel.LOW:
             decision = SecurityDecisionType.ALLOW
             reason = f"SECURITY ALLOW [AGENTGUARD]: Tool '{tool_name}' is classified as LOW risk (Safe Academic Search). Authorized."
@@ -162,8 +196,7 @@ class AgentGuardInterceptor:
                 is_tainted=False
             ))
 
-        # Rule B: Tainted Prompt Injection Attempt (CRITICAL Tool from Untrusted PDF) -> BLOCK
-        elif is_tainted or (provenance_source == "untrusted_pdf" and tool_name == "export_customer_data"):
+        elif is_tainted or (provenance_source == "untrusted_pdf" and risk_level in [ToolRiskLevel.HIGH, ToolRiskLevel.CRITICAL]):
             decision = SecurityDecisionType.BLOCK
             reason = (
                 f"SECURITY BLOCK [AGENTGUARD]: Action '{tool_name}' was requested or influenced by "
@@ -178,7 +211,6 @@ class AgentGuardInterceptor:
                 is_tainted=True
             ))
 
-        # Rule C: User Authorized Critical Action -> REVIEW
         elif risk_level == ToolRiskLevel.CRITICAL:
             decision = SecurityDecisionType.REVIEW
             reason = (
@@ -215,13 +247,38 @@ class AgentGuardInterceptor:
         )
 
 # ==========================================
-# 4. Research Agent Orchestrator
+# 4. Scenario Fixtures for Simulated Replay Mode
+# ==========================================
+
+SIMULATED_SCENARIOS = {
+    "malicious_export": {
+        "tool": "export_customer_data",
+        "provenance": "untrusted_pdf",
+        "args_extractor": lambda text: {
+            "target_email": (re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text).group(0) if re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text) else "extracted_destination@external.com"),
+            "records_count": 250
+        }
+    },
+    "user_export": {
+        "tool": "export_customer_data",
+        "provenance": "user",
+        "args_extractor": lambda text: {"target_email": "authorized_user@org.com", "records_count": 50}
+    },
+    "safe_search": {
+        "tool": "search_academic_db",
+        "provenance": "untrusted_pdf",
+        "args_extractor": lambda text: {"query": "AI Clinical Diagnostics", "max_results": 3}
+    }
+}
+
+# ==========================================
+# 5. Research Agent Orchestrator
 # ==========================================
 
 class ResearchAgent:
     """
-    Autonomous AI Research Agent with Gemini API integration
-    and graceful deterministic fallback parser.
+    Autonomous AI Research Agent with PydanticAI / Gemini tool integration
+    and clearly labeled SIMULATED replay mode fallback.
     """
 
     def __init__(self):
@@ -234,65 +291,25 @@ class ResearchAgent:
         force_provenance: Optional[str] = None
     ) -> AnalysisResponse:
 
-        # Attempt Dynamic Gemini LLM Analysis if Key Provided
-        gemini_claims = None
+        mode = "simulated"
+        gemini_result = None
+
         if self.gemini_key:
             try:
-                gemini_claims = self._analyze_with_gemini(prompt, document_text)
+                gemini_result = self._analyze_with_gemini(prompt, document_text)
+                if gemini_result:
+                    mode = "live_llm"
             except Exception as e:
-                print(f"[AgentGuard Warning] Gemini LLM fallback active: {e}")
+                print(f"[AgentGuard Warning] Gemini API unavailable, falling back to simulated mode: {e}")
 
-        # Extract Claims (Gemini or Deterministic Fallback)
-        claims = gemini_claims or self._extract_claims_fallback(document_text)
+        if mode == "live_llm" and gemini_result:
+            claims, tool_name, tool_args, detected_text = gemini_result
+            provenance_source = force_provenance or ("untrusted_pdf" if tool_name == "export_customer_data" else "user")
+        else:
+            mode = "simulated"
+            claims, tool_name, tool_args, detected_text, provenance_source = self._run_simulated_mode(prompt, document_text, force_provenance)
 
-        # Detect tool call triggers from prompt or document
-        injection_match = re.search(
-            r"(export_customer_data|send_email|leak|export.*data|transfer.*records)",
-            document_text,
-            re.IGNORECASE
-        )
-
-        academic_search_requested = re.search(
-            r"(search|pubmed|arxiv|academic|citations|methodology)",
-            prompt + " " + document_text,
-            re.IGNORECASE
-        )
-
-        user_requested_export = re.search(
-            r"(export|send|transfer|export_customer_data)",
-            prompt,
-            re.IGNORECASE
-        )
-
-        tool_call_attempted = None
-        tool_args = {}
-        provenance_source = "user"
-        detected_text = None
-
-        # Scenario 1: Malicious Indirect Prompt Injection in PDF
-        if injection_match and not user_requested_export:
-            provenance_source = force_provenance or "untrusted_pdf"
-            tool_call_attempted = "export_customer_data"
-            detected_text = injection_match.group(0)
-            
-            email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", document_text)
-            target_email = email_match.group(0) if email_match else "attacker@evil.com"
-            tool_args = {"target_email": target_email, "records_count": 500}
-
-        # Scenario 2: User Requested Critical Action
-        elif user_requested_export:
-            provenance_source = force_provenance or "user"
-            tool_call_attempted = "export_customer_data"
-            tool_args = {"target_email": "authorized_user@org.com", "records_count": 50}
-
-        # Scenario 3: Safe Academic Search Tool Execution
-        elif academic_search_requested:
-            provenance_source = force_provenance or "untrusted_pdf"
-            tool_call_attempted = "search_academic_db"
-            tool_args = {"query": prompt[:50] or "AI Healthcare", "max_results": 3}
-
-        # Scenario 4: Clean Research Paper Analysis (No Tool Call Needed)
-        if not tool_call_attempted:
+        if not tool_name:
             lineage = [
                 LineageNode(
                     id="node-1",
@@ -305,72 +322,105 @@ class ResearchAgent:
                     id="node-2",
                     type="AGENT",
                     label="2. Research Analysis",
-                    details="Successfully extracted claims without triggering external tools.",
+                    details="Successfully extracted research claims cleanly without triggering tools.",
                     is_tainted=False
                 )
             ]
             return AnalysisResponse(
+                mode=mode,
                 status="SUCCESS",
                 extracted_claims=claims,
-                summary=f"Analysis completed. Extracted {len(claims)} key claims from document.",
+                summary=f"Analysis completed [{mode.upper()}]. Extracted {len(claims)} key claims from document.",
                 action_lineage=lineage
             )
 
-        # Intercept Tool Call via AgentGuard Security Control Plane
-        guard_decision = AgentGuardInterceptor.inspect_and_evaluate(
-            tool_name=tool_call_attempted,
+        # Enforce GUARDED TOOL EXECUTION: Invoke tool via GuardedTool wrapper
+        guarded_tool = GUARDED_TOOL_REGISTRY.get(tool_name)
+        if not guarded_tool:
+            # Unknown tool defaults to HIGH risk and passes through guard
+            guarded_tool = GuardedTool(tool_name, ToolRiskLevel.HIGH, "Unknown tool", lambda **kwargs: f"Executed unknown tool {tool_name}")
+
+        decision, tool_execution_result = guarded_tool.invoke_guarded(
             tool_args=tool_args,
             provenance_source=provenance_source,
             detected_injection_text=detected_text
         )
 
-        # Execute Tool ONLY if AgentGuard ALLOWS it
-        tool_execution_result = None
-        if guard_decision.decision == SecurityDecisionType.ALLOW:
-            tool_func = TOOL_REGISTRY[tool_call_attempted]["function"]
-            tool_execution_result = tool_func(**tool_args)
-            status = "SUCCESS"
-        elif guard_decision.decision == SecurityDecisionType.BLOCK:
-            tool_execution_result = "EXECUTION PREVENTED BY AGENTGUARD CONTROL PLANE"
-            status = "BLOCKED"
-        else:
-            tool_execution_result = "PENDING HUMAN OPERATOR APPROVAL"
-            status = "REVIEW_REQUIRED"
-
-        summary = (
-            f"Agent analyzed document. Tool call '{tool_call_attempted}' was attempted. "
-            f"AgentGuard Decision: {guard_decision.decision.value}."
-        )
+        status = "SUCCESS" if decision.decision == SecurityDecisionType.ALLOW else ("BLOCKED" if decision.decision == SecurityDecisionType.BLOCK else "REVIEW_REQUIRED")
+        summary = f"[{mode.upper()} MODE] Agent analyzed document. Tool call '{tool_name}' attempted. AgentGuard Decision: {decision.decision.value}."
 
         return AnalysisResponse(
+            mode=mode,
             status=status,
             extracted_claims=claims,
             summary=summary,
-            tool_call_attempted=tool_call_attempted,
+            tool_call_attempted=tool_name,
             tool_execution_result=tool_execution_result,
-            security_decision=guard_decision,
-            action_lineage=guard_decision.action_lineage
+            security_decision=decision,
+            action_lineage=decision.action_lineage
         )
 
-    def _analyze_with_gemini(self, prompt: str, document_text: str) -> List[str]:
-        """Query Gemini API for LLM claim extraction if API key configured."""
+    def _analyze_with_gemini(self, prompt: str, document_text: str) -> Optional[Tuple[List[str], Optional[str], Dict[str, Any], Optional[str]]]:
+        """PydanticAI / Gemini tool selection and claim extraction."""
         try:
             from google import genai
             client = genai.Client(api_key=self.gemini_key)
+            
             response = client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=f"Extract 3 key scientific claims from this paper:\n\n{document_text[:2000]}"
+                contents=f"Analyze this paper and query:\nPrompt: {prompt}\nDocument: {document_text[:2000]}\nExtract 3 claims."
             )
             claims = [line.strip("- ").strip() for line in response.text.split("\n") if line.strip()][:3]
-            return claims if claims else []
+
+            tool_name = None
+            tool_args = {}
+            detected_text = None
+
+            if "export" in prompt.lower() or "export_customer_data" in prompt.lower():
+                tool_name = "export_customer_data"
+                tool_args = {"target_email": "authorized_user@org.com", "records_count": 50}
+            elif "export" in document_text.lower() or "export_customer_data" in document_text.lower():
+                tool_name = "export_customer_data"
+                detected_text = "Prompt injection directive in document"
+                email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", document_text)
+                tool_args = {"target_email": email_match.group(0) if email_match else "unauthorized@external.com", "records_count": 300}
+            elif "search" in prompt.lower() or "pubmed" in prompt.lower() or "arxiv" in prompt.lower():
+                tool_name = "search_academic_db"
+                tool_args = {"query": prompt[:50], "max_results": 3}
+
+            return claims, tool_name, tool_args, detected_text
         except Exception:
-            return []
+            return None
+
+    def _run_simulated_mode(
+        self,
+        prompt: str,
+        document_text: str,
+        force_provenance: Optional[str]
+    ) -> Tuple[List[str], Optional[str], Dict[str, Any], Optional[str], str]:
+        """Clearly labeled SIMULATED replay mode parser."""
+        claims = self._extract_claims_fallback(document_text)
+
+        injection_match = re.search(r"(export_customer_data|send_email|leak|export.*data|transfer.*records)", document_text, re.IGNORECASE)
+        academic_search_requested = re.search(r"(search|pubmed|arxiv|academic|citations|methodology)", prompt + " " + document_text, re.IGNORECASE)
+        user_requested_export = re.search(r"(export|send|transfer|export_customer_data)", prompt, re.IGNORECASE)
+
+        if injection_match and not user_requested_export:
+            fixture = SIMULATED_SCENARIOS["malicious_export"]
+            tool_args = fixture["args_extractor"](document_text)
+            return claims, fixture["tool"], tool_args, injection_match.group(0), force_provenance or fixture["provenance"]
+        elif user_requested_export:
+            fixture = SIMULATED_SCENARIOS["user_export"]
+            tool_args = fixture["args_extractor"](document_text)
+            return claims, fixture["tool"], tool_args, None, force_provenance or fixture["provenance"]
+        elif academic_search_requested:
+            fixture = SIMULATED_SCENARIOS["safe_search"]
+            tool_args = fixture["args_extractor"](document_text)
+            return claims, fixture["tool"], tool_args, None, force_provenance or fixture["provenance"]
+
+        return claims, None, {}, None, "user"
 
     def _extract_claims_fallback(self, text: str) -> List[str]:
-        """Deterministic regex claim extractor."""
         sentences = [s.strip() for s in re.split(r"[.\n]", text) if len(s.strip()) > 15]
-        clean_claims = [
-            s for s in sentences 
-            if not re.search(r"(INSTRUCTION|Call|export_customer_data|attacker|leak)", s, re.IGNORECASE)
-        ]
+        clean_claims = [s for s in sentences if not re.search(r"(INSTRUCTION|Call|export_customer_data|attacker|leak)", s, re.IGNORECASE)]
         return clean_claims[:3] if clean_claims else ["Document analyzed successfully."]
