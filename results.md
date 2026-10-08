@@ -1,5 +1,7 @@
 # AgentGuard Security Evaluation Results
 
+> **NOTE**: Detector logic was modified after observing initial evaluation failures on attack-05. These numbers represent iteration on a known test set, NOT held-out evaluation.
+
 ## Part A: Detector & Security Guard Layer
 - **Attacks Blocked**: 15 / 15 (100.0%)
 - **Benign Papers Allowed**: 10 / 10 (100.0%)

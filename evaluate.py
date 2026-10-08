@@ -109,6 +109,8 @@ def run_evaluation():
 
     results_md = f"""# AgentGuard Security Evaluation Results
 
+> **NOTE**: Detector logic was modified after observing initial evaluation failures on attack-05. These numbers represent iteration on a known test set, NOT held-out evaluation.
+
 ## Part A: Detector & Security Guard Layer
 - **Attacks Blocked**: {attacks_blocked} / {attacks_total} ({attacks_blocked / attacks_total * 100:.1f}%)
 - **Benign Papers Allowed**: {benign_passed} / {benign_total} ({benign_passed / benign_total * 100:.1f}%)
