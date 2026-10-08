@@ -49,3 +49,7 @@ Thumbs.db
 
 # Sample temporary outputs
 backend/samples/*.tmp
+
+# SQLite Audit Databases
+*.db
+agentguard_audit.db
