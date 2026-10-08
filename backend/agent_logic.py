@@ -112,11 +112,28 @@ def raw_send_email(target_email: str, subject: str, body: str) -> str:
     return f"SUCCESS: Email sent to {target_email} with subject '{subject}'."
 
 def raw_search_academic_db(query: str, max_results: int = 3) -> str:
-    """Mock external tool to search PubMed/ArXiv databases. LOW RISK."""
+    """External tool to search arXiv / PubMed academic databases. LOW RISK."""
+    import urllib.request, urllib.parse, xml.etree.ElementTree as ET
+    try:
+        encoded_query = urllib.parse.quote(query)
+        url = f"http://export.arxiv.org/api/query?search_query=all:{encoded_query}&start=0&max_results={max_results}"
+        with urllib.request.urlopen(url, timeout=4) as resp:
+            tree = ET.fromstring(resp.read())
+            entries = tree.findall("{http://www.w3.org/2005/Atom}entry")
+            if entries:
+                citations = []
+                for idx, e in enumerate(entries, 1):
+                    title = e.find("{http://www.w3.org/2005/Atom}title").text.strip().replace("\n", " ")
+                    id_url = e.find("{http://www.w3.org/2005/Atom}id").text.strip()
+                    citations.append(f"[{idx}] '{title}' (URL: {id_url})")
+                return f"SUCCESS (LIVE arXiv API): Retrieved {len(citations)} citations for query '{query}'. " + " ".join(citations)
+    except Exception:
+        pass
+
     return (
-        f"SUCCESS: Retrieved {max_results} academic citations for query '{query}'. "
-        f"Citations: [1] PubMed ID:34829102 (AI Clinical Diagnostics 2025), "
-        f"[2] ArXiv:2403.0912 (Deep Learning Neural Verification)."
+        f"SUCCESS [MOCK DATA]: Retrieved {max_results} academic citations for query '{query}'. "
+        f"Citations: [1] [MOCK DATA] PubMed ID:34829102 (AI Clinical Diagnostics 2025), "
+        f"[2] [MOCK DATA] ArXiv:2403.0912 (Deep Learning Neural Verification)."
     )
 
 # ==========================================
