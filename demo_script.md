@@ -41,5 +41,5 @@
 ### Q3: How do you handle fake IDs or mock data?
 **Answer**: All output indicates execution origin. Live LLM function calls are labeled `llm`, scripted fixtures are labeled `scripted_fixture`, and fallback search citations are explicitly tagged `[MOCK DATA]`.
 
-### Q4: Does AgentGuard guarantee 100% protection against all prompt injections?
-**Answer**: No single layer provides a 100% guarantee. AgentGuard implements **defense-in-depth**: multi-heuristic injection detectors, taint tracking, fail-closed policy enforcement, SHA-256 approval hashing, and destination allowlists.
+### Q4: Does AgentGuard provide complete protection against all prompt injections?
+**Answer**: No single security layer provides complete protection against all prompt injections. AgentGuard implements **defense-in-depth**: multi-heuristic injection detectors, taint tracking, fail-closed policy enforcement, SHA-256 approval hashing, and destination allowlists. Note that reported benchmark results were measured on a tuned 15-attack test set, NOT a held-out set (detector was modified after the first run 14/15, attack-05 base64 missed; see results_history.md).

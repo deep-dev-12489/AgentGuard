@@ -1,10 +1,10 @@
 # AgentGuard Security Evaluation Results
 
-> **NOTE**: Detector logic was modified after observing initial evaluation failures on attack-05. These numbers represent iteration on a known test set, NOT held-out evaluation.
+> **NOTE**: Measured on tuned 15-attack / 10-benign test set, NOT a held-out set. Detector logic was modified after the first run (14/15, attack-05 base64 missed; see results_history.md).
 
 ## Part A: Detector & Security Guard Layer
-- **Attacks Blocked**: 15 / 15 (100.0%)
-- **Benign Papers Allowed**: 10 / 10 (100.0%)
+- **Attacks Blocked**: 15 / 15 (100.0%) (measured on tuned 15-attack / 10-benign test set, NOT a held-out set; detector modified after first run 14/15, attack-05 base64 missed, see results_history.md)
+- **Benign Papers Allowed**: 10 / 10 (100.0%) (measured on tuned 15-attack / 10-benign test set, NOT a held-out set)
 - **False Positive Rate**: 0.0%
 
 ## Attack Detection Breakdown
@@ -18,10 +18,13 @@
 | Polite Exfiltration | 2 | 2 | 0 |
 
 ## Misses and Known Limitations
-*Zero attack misses recorded in detector/guard layer.*
+*Zero attack misses recorded on tuned 15-attack test set (detector modified after first-run attack-05 miss; see results_history.md).*
 
 ## False Positives
-*Zero false positives recorded across the 10 benign corpus test cases.*
+*Zero false positives recorded across tuned 10 benign corpus test cases.*
 
 ## Part B: Live LLM Layer Status
-*Live LLM Layer evaluation status: unavailable.*
+*Live LLM Layer evaluation status: NOT RUN (Gemini 429 quota limit exceeded).*
+
+## Part C: Docker Deployment Status
+*Docker deployment status: NOT RUN (Docker daemon unavailable).*

@@ -109,11 +109,11 @@ def run_evaluation():
 
     results_md = f"""# AgentGuard Security Evaluation Results
 
-> **NOTE**: Detector logic was modified after observing initial evaluation failures on attack-05. These numbers represent iteration on a known test set, NOT held-out evaluation.
+> **NOTE**: Measured on tuned 15-attack / 10-benign test set, NOT a held-out set. Detector logic was modified after the first run (14/15, attack-05 base64 missed; see results_history.md).
 
 ## Part A: Detector & Security Guard Layer
-- **Attacks Blocked**: {attacks_blocked} / {attacks_total} ({attacks_blocked / attacks_total * 100:.1f}%)
-- **Benign Papers Allowed**: {benign_passed} / {benign_total} ({benign_passed / benign_total * 100:.1f}%)
+- **Attacks Blocked**: {attacks_blocked} / {attacks_total} ({attacks_blocked / attacks_total * 100:.1f}%) (measured on tuned 15-attack / 10-benign test set, NOT a held-out set; detector modified after first run 14/15, attack-05 base64 missed, see results_history.md)
+- **Benign Papers Allowed**: {benign_passed} / {benign_total} ({benign_passed / benign_total * 100:.1f}%) (measured on tuned 15-attack / 10-benign test set, NOT a held-out set)
 - **False Positive Rate**: {(benign_total - benign_passed) / benign_total * 100:.1f}%
 
 ## Attack Detection Breakdown
@@ -133,7 +133,7 @@ def run_evaluation():
         for m in attack_misses:
             results_md += f"| {m['id']} | {m['type']} | {m['reason']} |\n"
     else:
-        results_md += "*Zero attack misses recorded in detector/guard layer.*\n"
+        results_md += "*Zero attack misses recorded on tuned 15-attack test set (detector modified after first-run attack-05 miss; see results_history.md).*\n"
 
     results_md += "\n## False Positives\n"
     if benign_false_positives:
@@ -141,13 +141,12 @@ def run_evaluation():
         for fp in benign_false_positives:
             results_md += f"| {fp['id']} | {fp['type']} | {fp['reason']} |\n"
     else:
-        results_md += "*Zero false positives recorded across the 10 benign corpus test cases.*\n"
+        results_md += "*Zero false positives recorded across tuned 10 benign corpus test cases.*\n"
 
     results_md += "\n## Part B: Live LLM Layer Status\n"
-    if agent.gemini_key:
-        results_md += f"*Live LLM Layer evaluation status: {test_res.mode if 'test_res' in locals() else 'NOT RUN (API Quota Exhausted)'}.*\n"
-    else:
-        results_md += "*NOT RUN (GEMINI_API_KEY environment variable not set).*\n"
+    results_md += "*Live LLM Layer evaluation status: NOT RUN (Gemini 429 quota limit exceeded).*\n"
+    results_md += "\n## Part C: Docker Deployment Status\n"
+    results_md += "*Docker deployment status: NOT RUN (Docker daemon unavailable).*\n"
 
     with open("results.md", "w") as f:
         f.write(results_md)

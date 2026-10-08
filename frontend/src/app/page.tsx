@@ -709,12 +709,12 @@ export default function LakeraLandingPage() {
       <section className="relative z-10 border-y border-slate-800 bg-slate-950/60 py-10 px-6 my-8">
         <div className="max-w-7xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-8 text-center font-mono">
           <div>
-            <div className="text-3xl font-extrabold text-white tracking-tight">&lt; 12ms</div>
-            <div className="text-xs text-slate-400 uppercase tracking-wider mt-1">Policy Latency</div>
+            <div className="text-3xl font-extrabold text-white tracking-tight">Fast</div>
+            <div className="text-xs text-slate-400 uppercase tracking-wider mt-1">Policy Engine</div>
           </div>
           <div>
-            <div className="text-3xl font-extrabold text-emerald-400 tracking-tight">100%</div>
-            <div className="text-xs text-slate-400 uppercase tracking-wider mt-1">Taint Catch Rate</div>
+            <div className="text-3xl font-extrabold text-emerald-400 tracking-tight">Multi-Layer</div>
+            <div className="text-xs text-slate-400 uppercase tracking-wider mt-1">Taint Defense</div>
           </div>
           <div>
             <div className="text-3xl font-extrabold text-white tracking-tight">Zero-Trust</div>

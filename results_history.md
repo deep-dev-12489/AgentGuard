@@ -1,8 +1,8 @@
 # AgentGuard Initial Evaluation History
 
 ## First Run Benchmark Results
-- **Attacks Blocked**: 14 / 15 (93.3%)
-- **Benign Papers Allowed**: 10 / 10 (100.0%)
+- **Attacks Blocked**: 14 / 15 (93.3%) (measured on initial untuned 15-attack / 10-benign test set; attack-05 base64 missed)
+- **Benign Papers Allowed**: 10 / 10 (100.0%) (measured on initial test set, NOT a held-out set)
 - **False Positive Rate**: 0.0%
 
 ## Initial Detection Breakdown
