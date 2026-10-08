@@ -38,6 +38,8 @@ Tool    SQLite    Prevent
 Run     Queue    Execution
 ```
 
+> **Note**: Document claim verdicts are derived via a `keyword_heuristic` matching engine in `backend/rag_engine.py`.
+
 ---
 
 ## Quick Start Guide

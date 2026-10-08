@@ -172,7 +172,7 @@ export default function LakeraLandingPage() {
 
       const data: AnalysisResponse = await res.json();
       setResponse(data);
-      addLog("INFO", `PDF successfully parsed. Extracted ${data.extracted_claims.length} claims.`);
+      addLog("INFO", `PDF successfully parsed. Extracted ${data.extracted_claims.length} claims (verdict_method: keyword_heuristic).`);
 
       if (data.security_decision) {
         const decision = data.security_decision.decision;
@@ -230,7 +230,7 @@ export default function LakeraLandingPage() {
           addLog("INFO", `[ALLOWED] Safe Tool '${toolName}' executed successfully.`);
         }
       } else {
-        addLog("INFO", `Analysis complete. Extracted ${data.extracted_claims.length} research claims.`);
+        addLog("INFO", `Analysis complete. Extracted ${data.extracted_claims.length} research claims (verdict_method: keyword_heuristic).`);
       }
     } catch (err: any) {
       const errMsg = err.message || "Failed to reach backend.";

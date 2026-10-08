@@ -425,7 +425,7 @@ class ResearchAgent:
         if document_text and len(document_text.strip()) > 0:
             chunks = rag.parse_pdf_bytes(document_text.encode("utf-8", errors="ignore"), "doc.pdf")
             evidence_claims = rag.retrieve_evidence_for_claims(chunks)
-            claims = [c.statement for c in evidence_claims]
+            claims = [f"[{c.verdict}] (verdict_method: {c.verdict_method}) {c.statement}" for c in evidence_claims]
 
         if not claims:
             claims = ["No document claims extracted from provided text."]

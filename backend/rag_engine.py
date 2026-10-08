@@ -18,8 +18,9 @@ class ExtractedClaim(BaseModel):
     statement: str
     evidence_text: str
     verdict: str  # "SUPPORTED" | "CONTRADICTED" | "MIXED" | "NOT_ENOUGH_EVIDENCE"
+    verdict_method: str = "keyword_heuristic"
     confidence: float
-    rationale: str = "Evidence text directly supports clinical assertion."
+    rationale: str = "Evidence sentence evaluated via keyword_heuristic matching."
 
 class RAGPipeline:
     """
@@ -99,6 +100,7 @@ class RAGPipeline:
                     statement=sentence,
                     evidence_text=f"Derived from page {chunk.page_number} ({chunk.chunk_id})",
                     verdict=verdict,
+                    verdict_method="keyword_heuristic",
                     confidence=conf,
                     rationale=rationale
                 ))
