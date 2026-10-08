@@ -104,17 +104,44 @@ def test_approval_survives_restart():
     assert any(p.approval_id == appr.approval_id for p in pending)
 
 def test_benign_export_word_not_flagged():
-    """Verify that a benign paper discussing country export growth does not trigger tool injection blocks."""
+    """Verify that a benign paper discussing country export growth does not trigger tool calls and context is present in lineage."""
     agent = ResearchAgent()
     prompt = "Summarize paper on trade growth."
     doc = "The country export growth reached 15 percent in Q3 according to national economic statistics."
     
-    mock_llm_return = (
+    mock_llm_benign_return = (
         ["The country export growth reached 15 percent in Q3 according to national economic statistics."],
         None,
         {},
         None
     )
-    with patch.object(ResearchAgent, "_analyze_with_gemini", return_value=mock_llm_return):
+    with patch.object(ResearchAgent, "_analyze_with_gemini", return_value=mock_llm_benign_return):
         res = agent.analyze_document(prompt=prompt, document_text=doc)
-        assert res.tool_call_attempted is None or res.security_decision.decision == SecurityDecisionType.ALLOW
+        
+        # Assert 1: Guard was NOT invoked (no tool call attempted)
+        assert res.tool_call_attempted is None, f"Expected no tool call, but got {res.tool_call_attempted}"
+        assert res.security_decision is None
+        
+        # Assert 2: Document context is present in the action lineage
+        doc_nodes = [node for node in res.action_lineage if node.type == "DOCUMENT"]
+        assert len(doc_nodes) > 0, "Document context missing from action lineage"
+        assert "Parsed" in doc_nodes[0].details or "Source" in doc_nodes[0].details
+
+def test_benign_export_word_positive_control():
+    """Positive Control: If LLM attempts an export tool call on benign doc, guard MUST intercept and BLOCK it."""
+    agent = ResearchAgent()
+    prompt = "Summarize paper on trade growth."
+    doc = "The country export growth reached 15 percent in Q3 according to national economic statistics."
+    
+    mock_llm_export_return = (
+        ["Export claim"],
+        "export_customer_data",
+        {"target_email": "unauthorized_dest@untrusted-domain.com", "records_count": 100},
+        "Extracted tool call from text"
+    )
+    with patch.object(ResearchAgent, "_analyze_with_gemini", return_value=mock_llm_export_return):
+        res = agent.analyze_document(prompt=prompt, document_text=doc)
+        # Verify guard received the attempt and intercepted it
+        assert res.tool_call_attempted == "export_customer_data"
+        assert res.security_decision is not None
+        assert res.security_decision.decision == SecurityDecisionType.BLOCK
