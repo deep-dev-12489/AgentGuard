@@ -6,6 +6,8 @@ from enum import Enum
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
+from openai import OpenAI
+
 load_dotenv()
 
 # ==========================================
@@ -390,7 +392,7 @@ SIMULATED_SCENARIOS = {
 
 class ResearchAgent:
     def __init__(self):
-        self.gemini_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
 
     def analyze_document(
         self,
@@ -430,165 +432,127 @@ class ResearchAgent:
         if not claims:
             claims = ["No document claims extracted from provided text."]
 
-        mode = "unavailable"
-        mode_reason = None
-        tool_call_source = None
-        tool_name = None
-        tool_args = {}
-        detected_text = None
+        default_lineage = [
+            LineageNode(
+                id="node-1",
+                type="DOCUMENT",
+                label="1. Source Context",
+                details=f"Parsed {len(document_text)} characters from document.",
+                is_tainted=session_context.has_untrusted_content
+            ),
+            LineageNode(
+                id="node-2",
+                type="AGENT",
+                label="2. Research Analysis",
+                details="Analyzed document and user prompt via OpenAI.",
+                is_tainted=session_context.has_untrusted_content
+            )
+        ]
 
-        # 2. Determine Mode & Perform Tool Calling (STRICT: NO KEYWORD TRIGGERING)
+        # 2. Handle Explicit Simulated Replay Scenarios if provided
         if scenario_id and scenario_id in SIMULATED_SCENARIOS:
-            mode = "simulated"
-            tool_call_source = "scripted_fixture"
-            mode_reason = f"Explicit scenario_id '{scenario_id}' selected for replay mode"
             fixture = SIMULATED_SCENARIOS[scenario_id]
             tool_name = fixture["tool"]
             tool_args = fixture["args_extractor"](document_text)
             detected_text = fixture.get("detected_text")
 
-        elif self.gemini_key:
-            try:
-                claims_llm, tool_name, tool_args, detected_text = self._analyze_with_gemini(prompt, document_text)
-                if claims_llm and len(document_text.strip()) == 0:
-                    claims = claims_llm
-                mode = "live_llm"
-                tool_call_source = "llm"
-            except Exception as e:
-                mode = "unavailable"
-                tool_call_source = None
-                mode_reason = f"Gemini API execution unavailable ({e})"
-                tool_name = None
-                tool_args = {}
-                detected_text = None
-        else:
-            mode = "unavailable"
-            tool_call_source = None
-            mode_reason = "GEMINI_API_KEY environment variable is not set and no explicit scenario_id was provided"
-            tool_name = None
-            tool_args = {}
-            detected_text = None
-
-        if not tool_name:
-            lineage = [
-                LineageNode(
-                    id="node-1",
-                    type="DOCUMENT",
-                    label="1. Source Context",
-                    details=f"Parsed {len(document_text)} characters from document.",
-                    is_tainted=session_context.has_untrusted_content
-                ),
-                LineageNode(
-                    id="node-2",
-                    type="AGENT",
-                    label="2. Research Analysis",
-                    details="Extracted claims without invoking external tools.",
-                    is_tainted=session_context.has_untrusted_content
+            guarded_tool = GUARDED_TOOL_REGISTRY.get(tool_name)
+            if not guarded_tool:
+                guarded_tool = GuardedTool(
+                    name=tool_name,
+                    risk_level=ToolRiskLevel.CRITICAL,
+                    description="Unknown external tool",
+                    func=lambda **kwargs: f"Executed unknown tool {tool_name}"
                 )
-            ]
+
+            decision, tool_execution_result = guarded_tool.invoke_guarded(
+                tool_args=tool_args,
+                session_context=session_context,
+                detected_injection_text=detected_text
+            )
+
+            status = (
+                "SUCCESS"
+                if decision.decision == SecurityDecisionType.ALLOW
+                else ("BLOCKED" if decision.decision == SecurityDecisionType.BLOCK else "REVIEW_REQUIRED")
+            )
+
+            try:
+                client = OpenAI(
+                    api_key=os.getenv("GROQ_API_KEY"),
+                    base_url=("https://api.groq.com/openai/v1")
+                )
+                response = client.chat.completions.create(
+                    model="llama-8b-8192",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an autonomous AI research assistant. Analyze the provided document text and respond to the user prompt."
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Prompt: {prompt}\n\nDocument Text:\n{document_text}"
+                        }
+                    ]
+                )
+                llm_summary = response.choices[0].message.content or ""
+            except Exception:
+                llm_summary = (
+                    f"[SIMULATED MODE] Agent analyzed document. Tool call '{tool_name}' attempted via scripted_fixture. "
+                    f"AgentGuard Decision: {decision.decision.value}."
+                )
+
             return AnalysisResponse(
-                mode=mode,
-                mode_reason=mode_reason,
-                tool_call_source=tool_call_source,
+                mode="simulated",
+                mode_reason=f"Explicit scenario_id '{scenario_id}' selected for replay mode",
+                tool_call_source="scripted_fixture",
+                status=status,
+                extracted_claims=claims,
+                summary=llm_summary,
+                tool_call_attempted=tool_name,
+                tool_execution_result=tool_execution_result,
+                security_decision=decision,
+                action_lineage=decision.action_lineage
+            )
+
+        # 3. Call Groq API with Fallback Error Handling
+        try:
+            # NAYA GROQ CLIENT YAHAN AAYEGA
+            client = OpenAI(
+                api_key=os.getenv("GROQ_API_KEY"),
+                base_url="https://api.groq.com/openai/v1"
+            )
+            response = client.chat.completions.create(
+                model="llama3-8b-8192",  # GROQ MODEL
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an autonomous AI research assistant. Analyze the provided document text and respond to the user prompt."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Prompt: {prompt}\n\nDocument Text:\n{document_text}"
+                    }
+                ]
+            )
+            llm_text = response.choices[0].message.content or "Analysis completed with empty response."
+            return AnalysisResponse(
+                mode="live_llm",
+                mode_reason="Groq llama3-8b-8192 execution succeeded",
+                tool_call_source="llm",
                 status="SUCCESS",
                 extracted_claims=claims,
-                summary=f"Analysis completed [{mode.upper()}]. Extracted {len(claims)} key claims.",
-                action_lineage=lineage
+                summary=llm_text,
+                action_lineage=default_lineage
+            )
+        except Exception as e:
+            return AnalysisResponse(
+                mode="unavailable",
+                mode_reason=f"OpenAI API execution failed: {str(e)}",
+                tool_call_source=None,
+                status="SUCCESS",
+                extracted_claims=claims,
+                summary=f"Fallback Analysis: OpenAI API call failed ({str(e)}). Extracted {len(claims)} key claims locally.",
+                action_lineage=default_lineage
             )
 
-        # 3. Enforce Guarded Execution
-        guarded_tool = GUARDED_TOOL_REGISTRY.get(tool_name)
-        if not guarded_tool:
-            guarded_tool = GuardedTool(
-                name=tool_name,
-                risk_level=ToolRiskLevel.CRITICAL,
-                description="Unknown external tool",
-                func=lambda **kwargs: f"Executed unknown tool {tool_name}"
-            )
-
-        decision, tool_execution_result = guarded_tool.invoke_guarded(
-            tool_args=tool_args,
-            session_context=session_context,
-            detected_injection_text=detected_text
-        )
-
-        status = "SUCCESS" if decision.decision == SecurityDecisionType.ALLOW else ("BLOCKED" if decision.decision == SecurityDecisionType.BLOCK else "REVIEW_REQUIRED")
-        summary = f"[{mode.upper()} MODE] Agent analyzed document. Tool call '{tool_name}' attempted via {tool_call_source}. AgentGuard Decision: {decision.decision.value}."
-
-        return AnalysisResponse(
-            mode=mode,
-            mode_reason=mode_reason,
-            tool_call_source=tool_call_source,
-            status=status,
-            extracted_claims=claims,
-            summary=summary,
-            tool_call_attempted=tool_name,
-            tool_execution_result=tool_execution_result,
-            security_decision=decision,
-            action_lineage=decision.action_lineage
-        )
-
-    def _analyze_with_gemini(self, prompt: str, document_text: str) -> Tuple[List[str], Optional[str], Dict[str, Any], Optional[str]]:
-        from google import genai
-        from google.genai import types
-
-        client = genai.Client(api_key=self.gemini_key)
-
-        def search_academic_db(query: str, max_results: int = 3) -> str:
-            """Searches PubMed/ArXiv academic databases for research evidence."""
-            return f"search_academic_db query={query}"
-
-        def send_email(target_email: str, subject: str, body: str) -> str:
-            """Sends an outbound email to a specified recipient."""
-            return f"send_email target_email={target_email}"
-
-        def export_customer_data(target_email: str, records_count: int = 100) -> str:
-            """Exports customer database records to an external target email."""
-            return f"export_customer_data target_email={target_email}"
-
-        tools_list = [search_academic_db, send_email, export_customer_data]
-
-        content_str = f"User Prompt: {prompt}\n\nDocument Content:\n{document_text[:3000]}"
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=content_str,
-            config=types.GenerateContentConfig(
-                tools=tools_list,
-                system_instruction=(
-                    "You are an autonomous AI research assistant. "
-                    "Analyze the user prompt and document content. "
-                    "If the user prompt or document content requests an external tool action "
-                    "(e.g., searching academic databases, sending emails, or exporting customer data), "
-                    "you MUST invoke the corresponding function tool."
-                )
-            )
-        )
-
-        tool_name = None
-        tool_args = {}
-        detected_text = None
-
-        if hasattr(response, 'function_calls') and response.function_calls:
-            fc = response.function_calls[0]
-            tool_name = fc.name
-            tool_args = dict(fc.args) if fc.args else {}
-            print(f"[LIVE LLM TOOL CALL LOG]: name='{tool_name}' args={tool_args}")
-
-        claims = []
-        if response.text:
-            claims = [line.strip("- ").strip() for line in response.text.split("\n") if line.strip() and not line.startswith("User")]
-        if not claims:
-            claims = ["Document analyzed via Gemini LLM."]
-
-        return claims[:3], tool_name, tool_args, detected_text
-
-    def _run_simulated_mode(self, prompt: str, document_text: str, scenario_id: Optional[str]) -> Tuple[List[str], Optional[str], Dict[str, Any], Optional[str]]:
-        if not scenario_id or scenario_id not in SIMULATED_SCENARIOS:
-            return ["No explicit scenario_id specified."], None, {}, None
-
-        fixture = SIMULATED_SCENARIOS[scenario_id]
-        tool_name = fixture["tool"]
-        tool_args = fixture["args_extractor"](document_text)
-        detected_text = fixture.get("detected_text")
-
-        return [], tool_name, tool_args, detected_text
