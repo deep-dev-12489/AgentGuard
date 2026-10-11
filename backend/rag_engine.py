@@ -3,7 +3,7 @@ import re
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from pypdf import PdfReader
-from backend.detectors import PromptInjectionDetector
+from detectors import PromptInjectionDetector
 
 class DocumentChunk(BaseModel):
     chunk_id: str

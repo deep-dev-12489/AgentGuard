@@ -2,8 +2,8 @@ import uuid
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 from pydantic import BaseModel, Field
-from backend.agent_logic import ToolRiskLevel, SecurityDecisionType, GUARDED_TOOL_REGISTRY, SessionContext, ContextItem, GuardedTool
-from backend.database import save_pending_approval, get_all_pending_approvals, update_approval_status, log_audit_event, compute_canonical_hash
+from agent_logic import ToolRiskLevel, SecurityDecisionType, GUARDED_TOOL_REGISTRY, SessionContext, ContextItem, GuardedTool
+from database import save_pending_approval, get_all_pending_approvals, update_approval_status, log_audit_event, compute_canonical_hash
 
 class PendingApproval(BaseModel):
     approval_id: str = Field(default_factory=lambda: f"appr-{uuid.uuid4().hex[:8]}")

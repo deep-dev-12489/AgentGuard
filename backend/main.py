@@ -5,9 +5,9 @@ from pydantic import BaseModel, Field
 import os
 import time
 
-from backend.agent_logic import AnalysisRequest, AnalysisResponse, ResearchAgent
-from backend.rag_engine import RAGPipeline
-from backend.mcp_gateway import mcp_gateway
+from agent_logic import AnalysisRequest, AnalysisResponse, ResearchAgent
+from rag_engine import RAGPipeline
+from mcp_gateway import mcp_gateway
 
 app = FastAPI(
     title="AgentGuard Security Control Plane API",

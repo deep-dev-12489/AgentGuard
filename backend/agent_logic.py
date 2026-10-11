@@ -419,7 +419,7 @@ class ResearchAgent:
             ))
 
         # Wire RAG Engine for Claim Extraction from document text
-        from backend.rag_engine import RAGPipeline
+        from rag_engine import RAGPipeline
         rag = RAGPipeline()
         claims = []
         if document_text and len(document_text.strip()) > 0:
