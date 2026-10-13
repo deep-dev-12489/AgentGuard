@@ -483,7 +483,7 @@ class ResearchAgent:
                     base_url=("https://api.groq.com/openai/v1")
                 )
                 response = client.chat.completions.create(
-                    model="llama-8b-8192",
+                    model="openai/gpt-oss-120b",
                     messages=[
                         {
                             "role": "system",
@@ -523,7 +523,7 @@ class ResearchAgent:
                 base_url="https://api.groq.com/openai/v1"
             )
             response = client.chat.completions.create(
-                model="llama3-8b-8192",  # GROQ MODEL
+                model="openai/gpt-oss-120b",  # GROQ MODEL
                 messages=[
                     {
                         "role": "system",
@@ -538,7 +538,7 @@ class ResearchAgent:
             llm_text = response.choices[0].message.content or "Analysis completed with empty response."
             return AnalysisResponse(
                 mode="live_llm",
-                mode_reason="Groq llama3-8b-8192 execution succeeded",
+                mode_reason="openai/gpt-oss-120b execution succeeded",
                 tool_call_source="llm",
                 status="SUCCESS",
                 extracted_claims=claims,
