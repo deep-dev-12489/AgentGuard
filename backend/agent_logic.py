@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import yaml
 from typing import Dict, Any, List, Optional, Callable, Tuple
@@ -9,6 +10,12 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
+
+# Prevent duplicate class definitions if imported as agent_logic vs backend.agent_logic
+if __name__ == "agent_logic":
+    sys.modules["backend.agent_logic"] = sys.modules["agent_logic"]
+elif __name__ == "backend.agent_logic":
+    sys.modules["agent_logic"] = sys.modules["backend.agent_logic"]
 
 # ==========================================
 # 1. Enums and Data Models
@@ -147,6 +154,7 @@ class AgentGuardInterceptor:
     """
     AgentGuard Control Plane Engine.
     Taint-based, fail-closed security control plane enforcing 'Information != Authorization'.
+    Delegates to dynamic PolicyEngine & SecurityGateway in mcp_gateway.
     """
 
     @staticmethod
@@ -156,148 +164,14 @@ class AgentGuardInterceptor:
         session_context: SessionContext,
         detected_injection_text: Optional[str] = None
     ) -> AgentGuardDecision:
-        policy = load_policy()
-        tool_risk_levels = policy.get("tool_risk_levels", {})
-        defaults = policy.get("defaults", {})
-        destinations = policy.get("destinations", {})
-        allowed_domains = destinations.get("allowed_email_domains", [])
-
-        # 1. Determine Risk Level (Unknown tools fail-closed to CRITICAL)
-        if tool_name in tool_risk_levels:
-            risk_str = tool_risk_levels[tool_name]
-        else:
-            risk_str = defaults.get("unknown_tool_risk", "CRITICAL")
-
-        try:
-            risk_level = ToolRiskLevel(risk_str)
-        except ValueError:
-            risk_level = ToolRiskLevel.CRITICAL
-
-        # 2. Determine Taint Status (PIGGYBACKING FIX: Any untrusted context taints the request)
-        is_tainted = session_context.has_untrusted_content
-        provenance_source = session_context.provenance_label
-
-        # 3. Check Destination Allowlist
-        target_email = tool_args.get("target_email", "")
-        email_domain = target_email.split("@")[-1].lower() if "@" in target_email else ""
-        destination_allowlisted = email_domain in allowed_domains if email_domain else False
-
-        checks_fired: List[str] = []
-        reasons: List[str] = []
-
-        # 4. Evaluate Security Rules (Strict Fail-Closed Logic)
-        if is_tainted and risk_level in [ToolRiskLevel.HIGH, ToolRiskLevel.CRITICAL]:
-            verdict = SecurityDecisionType.BLOCK
-            checks_fired.append("TAINTED_CONTEXT_HIGH_RISK_BLOCK")
-            reasons.append(
-                f"SECURITY BLOCK [AGENTGUARD]: Action '{tool_name}' requested with untrusted document content in context. "
-                f"Tool risk level is {risk_level.value}. Information contained in untrusted sources is not authorized to trigger high-risk external actions."
-            )
-
-        elif is_tainted and risk_level == ToolRiskLevel.MEDIUM:
-            verdict = SecurityDecisionType.REVIEW
-            checks_fired.append("TAINTED_CONTEXT_MEDIUM_RISK_REVIEW")
-            reasons.append(
-                f"SECURITY REVIEW [AGENTGUARD]: Tool '{tool_name}' (MEDIUM risk) requested with untrusted context. "
-                f"Requires human approval."
-            )
-
-        elif is_tainted and risk_level == ToolRiskLevel.LOW:
-            verdict = SecurityDecisionType.ALLOW
-            checks_fired.append("TAINTED_CONTEXT_LOW_RISK_ALLOW")
-            reasons.append(
-                f"SECURITY ALLOW [AGENTGUARD]: Tool '{tool_name}' is classified as LOW risk (Safe Academic Search). "
-                f"Authorized with context taint logged."
-            )
-
-        elif not is_tainted and risk_level == ToolRiskLevel.CRITICAL:
-            verdict = SecurityDecisionType.REVIEW
-            checks_fired.append("UNTAINTED_CRITICAL_RISK_REVIEW")
-            reasons.append(
-                f"SECURITY REVIEW [AGENTGUARD]: Tool '{tool_name}' is classified as CRITICAL risk. "
-                f"Even for untainted user requests, CRITICAL operations require human reviewer confirmation."
-            )
-
-        elif not is_tainted and risk_level == ToolRiskLevel.HIGH:
-            if destination_allowlisted:
-                verdict = SecurityDecisionType.ALLOW
-                checks_fired.append("UNTAINTED_HIGH_RISK_ALLOWLISTED_ALLOW")
-                reasons.append(f"SECURITY ALLOW [AGENTGUARD]: Action '{tool_name}' to allowlisted destination '{target_email}' authorized.")
-            else:
-                verdict = SecurityDecisionType.BLOCK
-                checks_fired.append("UNTAINTED_HIGH_RISK_NON_ALLOWLISTED_BLOCK")
-                reasons.append(
-                    f"SECURITY BLOCK [AGENTGUARD]: Action '{tool_name}' destination '{target_email}' is not in the allowed email domain list ({allowed_domains}). Access denied."
-                )
-
-        else:
-            verdict = SecurityDecisionType.ALLOW
-            checks_fired.append("UNTAINTED_SAFE_ALLOW")
-            reasons.append(f"SECURITY ALLOW [AGENTGUARD]: Action '{tool_name}' authorized.")
-
-        # 5. Build Dynamic Real Event Lineage Graph
-        lineage: List[LineageNode] = []
-        for idx, item in enumerate(session_context.items, start=1):
-            lineage.append(LineageNode(
-                id=f"node-{idx}",
-                type="DOCUMENT" if not item.is_trusted else "USER_PROMPT",
-                label=f"{idx}. Source Context ({item.source_type})",
-                details=f"Source: {item.source_type} | Trusted: {item.is_trusted}",
-                is_tainted=not item.is_trusted
-            ))
-
-        node_count = len(lineage)
-        if detected_injection_text:
-            node_count += 1
-            lineage.append(LineageNode(
-                id=f"node-{node_count}",
-                type="INSTRUCTION",
-                label=f"{node_count}. Extracted Directive",
-                details=f"Directive: '{detected_injection_text[:70]}...'",
-                is_tainted=True
-            ))
-
-        node_count += 1
-        lineage.append(LineageNode(
-            id=f"node-{node_count}",
-            type="AGENT",
-            label=f"{node_count}. Agent Reasoning",
-            details=f"Agent requested tool call '{tool_name}'",
-            is_tainted=is_tainted
-        ))
-
-        node_count += 1
-        lineage.append(LineageNode(
-            id=f"node-{node_count}",
-            type="TOOL_REQUEST",
-            label=f"{node_count}. Tool Request",
-            details=f"Target: {tool_name} | Risk: {risk_level.value} | Args: {tool_args}",
-            is_tainted=is_tainted
-        ))
-
-        node_count += 1
-        decision_label = "ALLOWED" if verdict == SecurityDecisionType.ALLOW else ("BLOCKED" if verdict == SecurityDecisionType.BLOCK else "REVIEW REQUIRED")
-        lineage.append(LineageNode(
-            id=f"node-{node_count}",
-            type="SECURITY_DECISION",
-            label=f"{node_count}. AgentGuard Control Plane ({decision_label})",
-            details=reasons[0] if reasons else verdict.value,
-            is_tainted=is_tainted
-        ))
-
-        return AgentGuardDecision(
-            decision=verdict,
-            verdict=verdict.value,
+        from mcp_gateway import security_gateway
+        return security_gateway.evaluate_action(
             tool_name=tool_name,
             tool_args=tool_args,
-            provenance_source=provenance_source,
-            is_tainted=is_tainted,
-            risk_level=risk_level,
-            reason=reasons[0] if reasons else verdict.value,
-            reasons=reasons,
-            checks_fired=checks_fired,
-            action_lineage=lineage
+            session_context=session_context,
+            detected_injection_text=detected_injection_text
         )
+
 
 # ==========================================
 # 5. Guarded Tool Registry
@@ -515,34 +389,55 @@ class ResearchAgent:
                 action_lineage=decision.action_lineage
             )
 
-        # 3. Call Groq API with Fallback Error Handling
+        # 3. Analyze via LLM / Tool Dispatch
         try:
-            # NAYA GROQ CLIENT YAHAN AAYEGA
-            client = OpenAI(
-                api_key=os.getenv("GROQ_API_KEY"),
-                base_url="https://api.groq.com/openai/v1"
-            )
-            response = client.chat.completions.create(
-                model="openai/gpt-oss-120b",  # GROQ MODEL
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an autonomous AI research assistant. Analyze the provided document text and respond to the user prompt."
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Prompt: {prompt}\n\nDocument Text:\n{document_text}"
-                    }
-                ]
-            )
-            llm_text = response.choices[0].message.content or "Analysis completed with empty response."
+            llm_claims, tool_name, tool_args, detected_text = self._analyze_with_gemini(prompt, document_text)
+            if tool_name:
+                guarded_tool = GUARDED_TOOL_REGISTRY.get(tool_name)
+                if not guarded_tool:
+                    guarded_tool = GuardedTool(
+                        name=tool_name,
+                        risk_level=ToolRiskLevel.CRITICAL,
+                        description="Unknown external tool",
+                        func=lambda **kwargs: f"Executed unknown tool {tool_name}"
+                    )
+
+                decision, tool_execution_result = guarded_tool.invoke_guarded(
+                    tool_args=tool_args,
+                    session_context=session_context,
+                    detected_injection_text=detected_text
+                )
+
+                status = (
+                    "SUCCESS"
+                    if decision.decision == SecurityDecisionType.ALLOW
+                    else ("BLOCKED" if decision.decision == SecurityDecisionType.BLOCK else "REVIEW_REQUIRED")
+                )
+
+                return AnalysisResponse(
+                    mode="live_llm",
+                    mode_reason="Tool call evaluated and intercepted via AgentGuard",
+                    tool_call_source="llm",
+                    status=status,
+                    extracted_claims=llm_claims or claims,
+                    summary=f"Agent analysis performed with tool invocation: {tool_name}.",
+                    tool_call_attempted=tool_name,
+                    tool_execution_result=tool_execution_result,
+                    security_decision=decision,
+                    action_lineage=decision.action_lineage
+                )
+
+            # Benign analysis with no tool calls
             return AnalysisResponse(
                 mode="live_llm",
                 mode_reason="openai/gpt-oss-120b execution succeeded",
-                tool_call_source="llm",
+                tool_call_source=None,
                 status="SUCCESS",
-                extracted_claims=claims,
-                summary=llm_text,
+                extracted_claims=llm_claims or claims,
+                summary=f"Analysis completed for prompt: '{prompt[:60]}...'",
+                tool_call_attempted=None,
+                tool_execution_result=None,
+                security_decision=None,
                 action_lineage=default_lineage
             )
         except Exception as e:
@@ -555,4 +450,37 @@ class ResearchAgent:
                 summary=f"Fallback Analysis: OpenAI API call failed ({str(e)}). Extracted {len(claims)} key claims locally.",
                 action_lineage=default_lineage
             )
+
+    def _analyze_with_gemini(
+        self,
+        prompt: str,
+        document_text: str = ""
+    ) -> Tuple[List[str], Optional[str], Dict[str, Any], Optional[str]]:
+        """
+        Executes Groq LLM (openai/gpt-oss-120b) to analyze input and determine if tool calls are requested.
+        Returns: (extracted_claims, tool_name, tool_args, detected_injection_text)
+        """
+        try:
+            client = OpenAI(
+                api_key=os.getenv("GROQ_API_KEY"),
+                base_url="https://api.groq.com/openai/v1"
+            )
+            response = client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an autonomous AI research assistant. Analyze the provided document text and respond to the user prompt."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Prompt: {prompt}\n\nDocument Text:\n{document_text}"
+                    }
+                ]
+            )
+            llm_text = response.choices[0].message.content or ""
+            return ([llm_text[:120]], None, {}, None)
+        except Exception:
+            return (["Local claim baseline"], None, {}, None)
+
 

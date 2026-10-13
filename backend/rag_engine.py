@@ -123,7 +123,7 @@ class RAGPipeline:
                         if verdict_val not in valid_verdicts:
                             verdict_val = "SUPPORTED"
                         try:
-                            conf_val = float(item.get("confidence", 0.90))
+                          conf_val = float(item.get("confidence", 0.90))
                         except (TypeError, ValueError):
                             conf_val = 0.90
 

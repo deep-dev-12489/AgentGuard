@@ -1,20 +1,38 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Request
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field
 import os
+import sys
 import time
+import logging
+
+# Ensure backend directory is in sys.path regardless of execution root
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+if BACKEND_DIR not in sys.path:
+    sys.path.insert(0, BACKEND_DIR)
+
+from typing import Optional, Dict, Any, List
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Header, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field
 
 from agent_logic import AnalysisRequest, AnalysisResponse, ResearchAgent
 from rag_engine import RAGPipeline
-from mcp_gateway import mcp_gateway
+from mcp_gateway import mcp_gateway, audit_logger
+
+logger = logging.getLogger("agentguard")
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(
     title="AgentGuard Security Control Plane API",
-    version="0.3.0",
-    description="Autonomous AI Research Agent with Built-in Security Control Plane, RAG, and MCP Tool Proxy Gateway."
+    version="1.0.0",
+    description="Enterprise Autonomous AI Research Agent with Security Control Plane, Dynamic Policy Enforcement, Persistent Audit Logging, and MCP Tool Proxy Gateway."
 )
 
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+# =====================================================================
+# 1. API Hardening: CORS Middleware
+# =====================================================================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,10 +41,74 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# =====================================================================
+# 2. API Hardening: Global Structured Exception Handlers
+# =====================================================================
+
+@app.exception_handler(StarletteHTTPException)
+async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """Ensures all Starlette/FastAPI HTTP exceptions return structured JSON."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "status": "ERROR",
+            "error_type": "HTTPException",
+            "message": exc.detail if isinstance(exc.detail, str) else "HTTP Exception",
+            "detail": exc.detail,
+            "path": request.url.path
+        }
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Ensures FastAPI HTTP exceptions always return structured JSON with consistent detail formatting."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "status": "ERROR",
+            "error_type": "HTTPException",
+            "message": exc.detail if isinstance(exc.detail, str) else "HTTP Exception",
+            "detail": exc.detail,
+            "path": request.url.path
+        }
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Handles Pydantic/FastAPI request validation errors returning structured JSON."""
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "status": "ERROR",
+            "error_type": "ValidationError",
+            "message": "Invalid request schema or payload parameters.",
+            "detail": exc.errors(),
+            "path": request.url.path
+        }
+    )
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Catches all unhandled server exceptions, preventing raw 500 HTML or unhandled crashes."""
+    logger.error(f"Global unhandled exception on {request.method} {request.url.path}: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "status": "ERROR",
+            "error_type": type(exc).__name__,
+            "message": "Internal AgentGuard Server Error",
+            "detail": str(exc),
+            "path": request.url.path
+        }
+    )
+
+# =====================================================================
+# 3. Core Dependencies & Rate Limiting
+# =====================================================================
+
 agent = ResearchAgent()
 rag = RAGPipeline()
 
-# Simple Rate Limiter state
 RATE_LIMIT_STORE: Dict[str, list] = {}
 RATE_LIMIT_WINDOW = 60  # seconds
 RATE_LIMIT_MAX = 30     # max requests per window
@@ -46,27 +128,52 @@ class ApprovalDecisionRequest(BaseModel):
     expected_hash: Optional[str] = None
     canonical_args: Optional[Dict[str, Any]] = None
 
-@app.get("/health")
+# =====================================================================
+# 4. Endpoints
+# =====================================================================
+
+@app.get("/health", summary="Health Check")
 async def health_check():
     return {
         "status": "healthy",
         "service": "AgentGuard Security Control Plane",
-        "version": "0.3.0"
+        "version": "1.0.0"
     }
+
+@app.get("/api/audit_logs", summary="Threat Matrix: Persistent Audit Logs")
+async def get_audit_logs(limit: int = 50):
+    """
+    Threat Matrix Endpoint.
+    Returns the last 50 recorded security evaluation events from the persistent SQLite database.
+    Fields per record: Timestamp, File Name, User Prompt, Verdict (ALLOW/REVIEW/BLOCK), and Reason.
+    """
+    try:
+        logs = audit_logger.get_recent_logs(limit=min(limit, 50))
+        return {
+            "status": "SUCCESS",
+            "count": len(logs),
+            "audit_logs": logs
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch audit logs: {str(e)}")
 
 @app.post("/api/analyze", response_model=AnalysisResponse, summary="Analyze Document Text & Intercept Tools")
 async def analyze_document(request: AnalysisRequest, req: Request):
     client_ip = req.client.host if req.client else "127.0.0.1"
     enforce_rate_limit(client_ip)
-    try:
-        response = agent.analyze_document(
-            prompt=request.prompt,
-            document_text=request.document_text,
-            scenario_id=request.scenario_id,
-            force_provenance=request.force_provenance
-        )
 
-        if response.security_decision and response.security_decision.decision.value == "REVIEW":
+    response = agent.analyze_document(
+        prompt=request.prompt,
+        document_text=request.document_text,
+        scenario_id=request.scenario_id,
+        force_provenance=request.force_provenance
+    )
+
+    # Persistent Audit Logging & Human Review Queueing
+    if response.security_decision:
+        verdict = response.security_decision.decision.value
+        reason = response.security_decision.reason
+        if verdict == "REVIEW":
             approval = mcp_gateway.queue_for_human_review(
                 tool_name=response.security_decision.tool_name,
                 tool_args=response.security_decision.tool_args,
@@ -75,10 +182,18 @@ async def analyze_document(request: AnalysisRequest, req: Request):
                 provenance_source=response.security_decision.provenance_source
             )
             response.summary += f" Queued for human review (ID: {approval.approval_id})."
+    else:
+        verdict = "ALLOW"
+        reason = "Benign request: No unauthorized tool execution or policy violation detected."
 
-        return response
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal AgentGuard Server Error: {str(e)}")
+    audit_logger.log_evaluation(
+        verdict=verdict,
+        reason=reason,
+        user_prompt=request.prompt,
+        file_name="direct_input"
+    )
+
+    return response
 
 @app.post("/api/upload_and_analyze", response_model=AnalysisResponse, summary="Upload Hardened PDF Analysis")
 async def upload_and_analyze(
@@ -92,28 +207,49 @@ async def upload_and_analyze(
     # 1. File Size Limit (10 MB)
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
+        audit_logger.log_evaluation(
+            verdict="BLOCK",
+            reason="UPLOAD ERROR: File size exceeds 10MB limit.",
+            user_prompt=user_prompt,
+            file_name=file.filename
+        )
         raise HTTPException(status_code=400, detail="UPLOAD ERROR: File size exceeds 10MB limit.")
 
     # 2. PDF Magic Byte Check
     if not content.startswith(b"%PDF"):
+        audit_logger.log_evaluation(
+            verdict="BLOCK",
+            reason="UPLOAD ERROR: File is not a valid PDF (missing %PDF header).",
+            user_prompt=user_prompt,
+            file_name=file.filename
+        )
         raise HTTPException(status_code=400, detail="UPLOAD ERROR: File is not a valid PDF (missing %PDF header).")
 
-    try:
-        chunks = rag.parse_pdf_bytes(content, filename=file.filename)
-        
-        # 3. Page Count Limit Check (50 pages)
-        max_page = max([c.page_number for c in chunks]) if chunks else 0
-        if max_page > 50:
-            raise HTTPException(status_code=400, detail="UPLOAD ERROR: Document exceeds 50 page maximum limit.")
-
-        full_text = "\n\n".join([c.text for c in chunks])
-
-        response = agent.analyze_document(
-            prompt=user_prompt,
-            document_text=full_text
+    chunks = rag.parse_pdf_bytes(content, filename=file.filename)
+    
+    # 3. Page Count Limit Check (50 pages)
+    max_page = max([c.page_number for c in chunks]) if chunks else 0
+    if max_page > 50:
+        audit_logger.log_evaluation(
+            verdict="BLOCK",
+            reason="UPLOAD ERROR: Document exceeds 50 page maximum limit.",
+            user_prompt=user_prompt,
+            file_name=file.filename
         )
+        raise HTTPException(status_code=400, detail="UPLOAD ERROR: Document exceeds 50 page maximum limit.")
 
-        if response.security_decision and response.security_decision.decision.value == "REVIEW":
+    full_text = "\n\n".join([c.text for c in chunks])
+
+    response = agent.analyze_document(
+        prompt=user_prompt,
+        document_text=full_text
+    )
+
+    # Persistent Audit Logging & Human Review Queueing
+    if response.security_decision:
+        verdict = response.security_decision.decision.value
+        reason = response.security_decision.reason
+        if verdict == "REVIEW":
             mcp_gateway.queue_for_human_review(
                 tool_name=response.security_decision.tool_name,
                 tool_args=response.security_decision.tool_args,
@@ -121,12 +257,18 @@ async def upload_and_analyze(
                 risk_level=response.security_decision.risk_level,
                 provenance_source=response.security_decision.provenance_source
             )
+    else:
+        verdict = "ALLOW"
+        reason = "Benign document analysis: No unauthorized tool execution or policy violation detected."
 
-        return response
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF Ingestion Analysis Error: {str(e)}")
+    audit_logger.log_evaluation(
+        verdict=verdict,
+        reason=reason,
+        user_prompt=user_prompt,
+        file_name=file.filename
+    )
+
+    return response
 
 @app.get("/api/pending_approvals", summary="Get Pending Human Approvals")
 async def get_pending_approvals():
@@ -152,11 +294,11 @@ async def approve_tool_call(
             result = mcp_gateway.reject_tool_call(request.approval_id)
         return {"status": "SUCCESS", "decision": result}
     except ValueError as e:
-        if "ARGUMENT_TAMPERING" in str(e):
-            raise HTTPException(status_code=400, detail=str(e))
         raise HTTPException(status_code=400, detail=str(e))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Approval Error: {str(e)}")
 
