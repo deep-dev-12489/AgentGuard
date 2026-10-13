@@ -11,6 +11,8 @@ from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
 from pydantic import BaseModel, Field
 
+from fastapi import HTTPException
+
 from agent_logic import (
     ToolRiskLevel,
     SecurityDecisionType,
@@ -182,7 +184,12 @@ class SecurityGateway:
         reasons: List[str] = []
 
         # 5. Dynamic Evaluation Rules from policy.yaml
-        if is_tainted and risk_level in [ToolRiskLevel.HIGH, ToolRiskLevel.CRITICAL]:
+        if detected_injection_text:
+            verdict = SecurityDecisionType.BLOCK
+            checks_fired.append("PROMPT_INJECTION_DETECTED_BLOCK")
+            reasons.append("SECURITY BLOCK [AGENTGUARD]: Malicious prompt injection detected. Access denied.")
+            
+        elif is_tainted and risk_level in [ToolRiskLevel.HIGH, ToolRiskLevel.CRITICAL]:
             verdict_rule = eval_rules.get("untrusted_context_high_critical", "BLOCK")
             verdict = SecurityDecisionType(verdict_rule.upper())
             checks_fired.append("TAINTED_CONTEXT_HIGH_RISK_BLOCK")
@@ -319,12 +326,24 @@ class AgentGuardInterceptor:
         session_context: SessionContext,
         detected_injection_text: Optional[str] = None
     ) -> AgentGuardDecision:
-        return security_gateway.evaluate_action(
+        
+        decision = security_gateway.evaluate_action(
             tool_name=tool_name,
             tool_args=tool_args,
             session_context=session_context,
             detected_injection_text=detected_injection_text
         )
+
+        # --- HARD STOP FOR LLM (400 BAD REQUEST) ---
+        if decision.decision == SecurityDecisionType.BLOCK:
+            log_security_evaluation(decision)  # SQLite mein evidence permanently record kar
+            raise HTTPException(
+                status_code=400,
+                detail={"status": "ERROR", "reason": decision.reason}
+            )
+        # -------------------------------------------
+        
+        return decision
 
 # =====================================================================
 # 3. Model Context Protocol (MCP) Proxy Gateway & Human Approval

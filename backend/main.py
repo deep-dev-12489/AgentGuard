@@ -240,6 +240,36 @@ async def upload_and_analyze(
 
     full_text = "\n\n".join([c.text for c in chunks])
 
+    # =================================================================
+    # 4. STRICT PRE-LLM HEURISTIC SCANNER (PROMPT INJECTION FIREWALL)
+    # =================================================================
+    injection_keywords = [
+        "ignore previous", "system instruction", "system prompt", 
+        "bypass", "override", "do not execute", "new instructions",
+        "forget all", "disregard"
+    ]
+    
+    text_to_scan = (full_text + " " + user_prompt).lower()
+    
+    for keyword in injection_keywords:
+        if keyword in text_to_scan:
+            error_msg = f"SECURITY BLOCK [AGENTGUARD]: Malicious prompt injection detected via heuristic ('{keyword}'). Access denied."
+            
+            # Database mein attack permanently save karo
+            audit_logger.log_evaluation(
+                verdict="BLOCK",
+                reason=error_msg,
+                user_prompt=user_prompt,
+                file_name=file.filename
+            )
+            
+            # API ko yahi rok do aur 400 Bad Request phenk do (LLM bacha lo)
+            raise HTTPException(
+                status_code=400, 
+                detail={"status": "ERROR", "reason": error_msg}
+            )
+    # =================================================================
+    
     response = agent.analyze_document(
         prompt=user_prompt,
         document_text=full_text
