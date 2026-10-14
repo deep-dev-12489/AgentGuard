@@ -1,3 +1,6 @@
+# hackindia-ai-cybertech-hackathon-2026-deepai
+Hackathon team repository for Deep.ai - [hackindia-team:hackindia-ai-cybertech-hackathon-2026:deepai]
+
 # AgentGuard: Autonomous Security Control Plane for AI Research Agents
 
 AgentGuard is a security control plane and runtime interceptor for AI research agents. It enforces the principle **"Information != Authorization"** by tracking data provenance, detecting prompt injections, and intercepting unauthorized tool calls before execution.
