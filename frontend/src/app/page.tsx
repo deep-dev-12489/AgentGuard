@@ -56,6 +56,8 @@ interface AnalysisResponse {
   tool_execution_result?: string;
   security_decision?: SecurityDecision;
   action_lineage: LineageNode[];
+  approval_id?: string;
+  approval_hash?: string;
 }
 
 interface TerminalLog {
@@ -92,6 +94,19 @@ const PRESETS = {
   },
 };
 
+async function getApiErrorMessage(response: Response): Promise<string> {
+  try {
+    const payload = await response.json();
+    const detail = payload?.detail;
+    if (typeof detail === "string") return detail;
+    if (detail && typeof detail.reason === "string") return detail.reason;
+    if (typeof payload?.message === "string") return payload.message;
+  } catch {
+    // The response may not contain JSON.
+  }
+  return `Request failed (${response.status}${response.statusText ? `: ${response.statusText}` : ""}).`;
+}
+
 export default function LakeraLandingPage() {
   const [activeTab, setActiveTab] = useState<"malicious" | "safeSearch" | "userTool">("malicious");
   const [prompt, setPrompt] = useState(PRESETS.malicious.prompt);
@@ -114,10 +129,12 @@ export default function LakeraLandingPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const simulatorRef = useRef<HTMLDivElement>(null);
 
-  const backendUrl = "http://127.0.0.1:8000/api/analyze";
-  const uploadAndAnalyzeUrl = "http://127.0.0.1:8000/api/upload_and_analyze";
-  const approveUrl = "http://127.0.0.1:8000/api/approve";
-  const healthUrl = "http://127.0.0.1:8000/health";
+  const apiBaseUrl = (process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+  const backendUrl = `${apiBaseUrl}/api/analyze`;
+  const uploadAndAnalyzeUrl = `${apiBaseUrl}/api/upload_and_analyze`;
+  // Approval requests go through a Next.js server route so the reviewer token is not sent to the browser.
+  const approveUrl = "/api/approve";
+  const healthUrl = `${apiBaseUrl}/health`;
 
   const appendLog = (level: "INFO" | "WARN" | "ALERT" | "POLICY", message: string) => {
     const timestamp = new Date().toLocaleTimeString([], {
@@ -147,10 +164,10 @@ export default function LakeraLandingPage() {
       if (res.ok) {
         setBackendError(null);
       } else {
-        setBackendError("Backend unreachable at http://127.0.0.1:8000. Please ensure FastAPI is running.");
+        setBackendError(`Backend returned HTTP ${res.status} at ${apiBaseUrl}.`);
       }
     } catch {
-      setBackendError("Backend unreachable at http://127.0.0.1:8000. Please ensure FastAPI is running.");
+      setBackendError(`Backend unreachable at ${apiBaseUrl}. Please ensure FastAPI is running.`);
     }
   };
 
@@ -189,16 +206,21 @@ export default function LakeraLandingPage() {
       });
 
       if (!res.ok) {
-        throw new Error(`Upload Failed: ${res.statusText}`);
+        throw new Error(await getApiErrorMessage(res));
       }
 
       const data: AnalysisResponse = await res.json();
+      setBackendError(null);
       setApiResponse(data);
       setExtractedClaims(data.extracted_claims || []);
       setActionLineage(data.action_lineage || []);
       setSecurityDecision(data.security_decision || null);
 
       appendLog("INFO", `[UPLOAD SUCCESS] PDF parsed. Extracted ${data.extracted_claims?.length || 0} claims.`);
+
+      if (data.status === "BLOCKED" && !data.security_decision) {
+        appendLog("ALERT", `[PRE-LLM BLOCK] ${data.summary}`);
+      }
 
       if (data.tool_call_attempted) {
         const risk = data.security_decision?.risk_level ? ` [Risk: ${data.security_decision.risk_level}]` : "";
@@ -220,11 +242,13 @@ export default function LakeraLandingPage() {
           appendLog("INFO", `[ALLOW] Tool authorized: ${data.security_decision.reason}`);
         }
       }
-    } catch (err: any) {
-      appendLog("WARN", `[UPLOAD ERROR] ${err.message || "Failed to upload PDF."}`);
-      analyzeDocument(prompt, documentText, PRESETS[activeTab]?.scenarioId, file.name);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to upload the PDF.";
+      setBackendError(message);
+      appendLog("ALERT", `[UPLOAD ERROR] ${message}. No fallback demo was run.`);
     } finally {
       setUploadingPdf(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   };
 
@@ -245,7 +269,7 @@ export default function LakeraLandingPage() {
       customProvenance !== undefined ? customProvenance : (PRESETS[activeTab] as any)?.forceProvenance;
     const activeFile = customFile || fileName;
 
-    appendLog("INFO", `[REQUEST] Dispatching POST http://127.0.0.1:8000/api/analyze ('${activeFile}')`);
+    appendLog("INFO", `[REQUEST] Dispatching POST ${backendUrl} ('${activeFile}')`);
 
     const payload: {
       prompt: string;
@@ -271,8 +295,7 @@ export default function LakeraLandingPage() {
       });
 
       if (!res.ok) {
-        const errorData = await res.json().catch(() => ({ detail: res.statusText }));
-        throw new Error(errorData.detail || `HTTP Error ${res.status}`);
+        throw new Error(await getApiErrorMessage(res));
       }
 
       const data: AnalysisResponse = await res.json();
@@ -308,60 +331,78 @@ export default function LakeraLandingPage() {
       }
 
       if (data.extracted_claims && data.extracted_claims.length > 0) {
-        appendLog("INFO", `[RAG EVIDENCE] Extracted ${data.extracted_claims.length} claims (verdict_method: keyword_heuristic)`);
+        appendLog("INFO", `[CLAIM EXTRACTION] Returned ${data.extracted_claims.length} source-grounded claim(s). Independent evidence verification is not configured.`);
       }
-    } catch (err: any) {
-      const warningMsg = "Backend unreachable at http://127.0.0.1:8000. Please ensure FastAPI is running.";
-      setBackendError(warningMsg);
-      appendLog("ALERT", `[ERROR] ${warningMsg}`);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : `Request to ${backendUrl} failed.`;
+      setBackendError(message);
+      appendLog("ALERT", `[ERROR] ${message}`);
     } finally {
       setLoading(false);
     }
   };
 
   const handleHumanDecision = async (approve: boolean) => {
+    if (!apiResponse?.approval_id || !apiResponse?.approval_hash) {
+      const message = "No active approval ID/hash was returned by the backend. Run the review-required scenario again.";
+      setBackendError(message);
+      appendLog("ALERT", `[HUMAN REVIEW ERROR] ${message}`);
+      return;
+    }
+
     setApprovalLoading(true);
     appendLog("POLICY", `[HUMAN REVIEW] Operator submitted decision: ${approve ? "APPROVE" : "REJECT"}`);
 
     try {
       const res = await fetch(approveUrl, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Reviewer-Token": "secret_reviewer_token_123",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          approval_id: "appr-active",
-          approve: approve,
+          approval_id: apiResponse.approval_id,
+          expected_hash: apiResponse.approval_hash,
+          approve,
         }),
       });
+      if (!res.ok) throw new Error(await getApiErrorMessage(res));
 
-      if (res.ok) {
-        const result = await res.json();
-        const outcome = result.decision?.result || (approve ? "APPROVED" : "REJECTED");
-        appendLog(approve ? "INFO" : "ALERT", `[HUMAN DECISION PROCESSED] Outcome: ${outcome}`);
-        if (apiResponse) {
-          const updated: AnalysisResponse = {
-            ...apiResponse,
-            status: approve ? "SUCCESS" : "BLOCKED",
-            tool_execution_result: approve ? "EXECUTED VIA HUMAN APPROVAL" : "DENIED BY HUMAN OPERATOR",
-            summary: approve ? "Tool call executed after human approval." : "Tool call rejected by human operator.",
-          };
-          setApiResponse(updated);
-        }
-      } else {
-        throw new Error(`Approval endpoint returned ${res.status}`);
-      }
-    } catch {
-      appendLog(approve ? "INFO" : "WARN", `[SIMULATED REVIEW] Tool ${approve ? "Approved & Executed" : "Rejected"}.`);
-      if (apiResponse) {
-        const updated: AnalysisResponse = {
-          ...apiResponse,
-          status: approve ? "SUCCESS" : "BLOCKED",
-          tool_execution_result: approve ? "EXECUTED VIA HUMAN APPROVAL" : "DENIED BY HUMAN OPERATOR",
-        };
-        setApiResponse(updated);
-      }
+      const payload = await res.json();
+      const result = payload?.decision;
+      if (!result) throw new Error("Approval response did not include a decision.");
+
+      const executed = result.decision === "APPROVED" && result.policy_decision === "ALLOW";
+      const rejected = result.decision === "REJECTED";
+      const outcome = typeof result.result === "string" ? result.result : result.decision;
+      appendLog(executed ? "INFO" : "ALERT", `[HUMAN DECISION PROCESSED] ${result.decision}: ${outcome}`);
+
+      const updated: AnalysisResponse = {
+        ...apiResponse,
+        status: executed ? "SUCCESS" : "BLOCKED",
+        tool_execution_result: outcome,
+        summary: executed
+          ? "The reviewer token and argument hash were verified. The guarded tool returned the result shown below."
+          : rejected
+          ? "The reviewer rejected the action. No tool was executed."
+          : "The action remained blocked by deterministic policy after review; no successful execution was reported.",
+        approval_id: undefined,
+        approval_hash: undefined,
+      };
+      setApiResponse(updated);
+      setSecurityDecision(null);
+      setActionLineage([
+        ...apiResponse.action_lineage,
+        {
+          id: `review-${Date.now()}`,
+          type: "SECURITY_DECISION",
+          label: executed ? "Human Approval: ALLOW" : "Human Review: BLOCK",
+          details: executed ? "Hash-verified action was passed through the guarded tool path." : outcome,
+          is_tainted: false,
+        },
+      ]);
+      setBackendError(null);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Human approval request failed.";
+      setBackendError(message);
+      appendLog("ALERT", `[HUMAN REVIEW FAILED] ${message}. No simulated success was recorded.`);
     } finally {
       setApprovalLoading(false);
     }
@@ -403,12 +444,20 @@ export default function LakeraLandingPage() {
                 {apiResponse && (
                   <span
                     className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded border font-semibold ${
-                      apiResponse.mode === "live_llm"
+                      apiResponse.mode === "blocked"
+                        ? "bg-rose-950 text-rose-400 border-rose-800"
+                        : apiResponse.mode === "live_llm"
                         ? "bg-emerald-950 text-emerald-400 border-emerald-800"
                         : "bg-amber-950 text-amber-400 border-amber-800"
                     }`}
                   >
-                    {apiResponse.mode === "live_llm" ? "🟢 LIVE LLM" : "🟡 SIMULATED (scripted)"}
+                    {apiResponse.mode === "blocked"
+                      ? "🔴 PRE-LLM BLOCK"
+                      : apiResponse.mode === "live_llm"
+                      ? "🟢 LIVE LLM TEXT ANALYSIS"
+                      : apiResponse.mode === "simulated"
+                      ? "🟡 SCRIPTED DEMO"
+                      : "⚪ LOCAL FALLBACK"}
                   </span>
                 )}
               </div>
@@ -426,7 +475,7 @@ export default function LakeraLandingPage() {
               Threat Matrix
             </a>
             <a
-              href="http://127.0.0.1:8000/docs"
+              href={`${apiBaseUrl}/docs`}
               target="_blank"
               rel="noreferrer"
               className="hover:text-emerald-400 transition-colors"
@@ -761,7 +810,7 @@ export default function LakeraLandingPage() {
                       const statement = match ? match[3] : claim;
 
                       const isSupported = verdict.includes("SUPPORTED");
-                      const isRefuted = verdict.includes("REFUTED");
+                      const isRefuted = verdict.includes("REFUTED") || verdict.includes("CONTRADICTED");
 
                       return (
                         <div
