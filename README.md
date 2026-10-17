@@ -1,113 +1,169 @@
-# hackindia-ai-cybertech-hackathon-2026-deepai
-Hackathon team repository for Deep.ai - [hackindia-team:hackindia-ai-cybertech-hackathon-2026:deepai]
+AgentGuard — AI Agent Runtime Security Control Plane
 
-# AgentGuard: Autonomous Security Control Plane for AI Research Agents
+AgentGuard is a hackathon MVP that demonstrates a simple principle: information is not authorization. Documents and other external content are treated as untrusted input, while tool actions are evaluated by deterministic policy before a registered tool can run.
 
-AgentGuard is a security control plane and runtime interceptor for AI research agents. It enforces the principle **"Information != Authorization"** by tracking data provenance, detecting prompt injections, and intercepting unauthorized tool calls before execution.
+What is implemented
 
----
+Pre-LLM PDF inspection: PDF uploads are streamed with a 10 MB cap, validated as PDFs, limited to 50 pages, and scanned for prompt-injection-like patterns before general LLM analysis.
 
-## Key Features
+Deterministic tool policy: action risk, source provenance, destination allowlists, and export record limits are evaluated in Python. LLM output is not the authority for ALLOW/REVIEW/BLOCK.
 
-1. **Guarded Tool Execution (`GuardedTool`)**: In-process security interception wrapper for tool execution (`export_customer_data`, `send_email`, `search_academic_db`).
-2. **Data Provenance & Taint Tracking (`SessionContext`)**: Distinguishes trusted user context from untrusted PDF chunks and web data. Tainted contexts block high-risk tool calls (unit-tested with mocked LLM).
-3. **Pluggable Multi-Heuristic Detector (`PromptInjectionDetector`)**: Detects role impersonation, system overrides, hidden text markers, base64 blobs, and polite exfiltration phrasing.
-4. **Human-in-the-Loop Approval Queue (`MCPGateway` + SQLite)**: Persists pending approvals in SQLite (`agentguard_audit.db`) (SQLite reload verified in the same process), enforces SHA-256 argument hash verification, single-use approval tokens, and reviewer authentication.
-5. **Real Free arXiv Search Integration**: Direct integration with arXiv API for academic evidence queries.
-6. **Hardened Upload Pipeline**: Enforces 10MB size limits, `%PDF` header validation, 50-page limits, and per-IP rate limiting.
+Single-use human approval: critical trusted actions can be queued for review. The approval is bound to a SHA-256 hash of the tool name and arguments, expires after 10 minutes, and is atomically claimed before execution.
 
----
+SQLite audit trail: security evaluations and approval outcomes persist across backend restarts.
 
-## Measured Implementation Facts
+Scripted demo scenarios: the UI includes three intentionally scripted scenarios (malicious export, safe academic search, and a review-required user export) to make the control-plane decisions reproducible.
 
-- **Execution Architecture**: Guard runs in the same Python process as the research agent (single process).
-- **Taint Enforcement**: Guard blocks HIGH/CRITICAL tool calls when untrusted content is in context (verified via unit tests with a mocked LLM).
-- **Evaluation Corpus**: 15/15 attacks flagged, 10/10 benign allowed, measured on a tuned test set, NOT a held-out set. First-run benchmark was 14/15 (attack-05 base64 missed; see `results_history.md`).
-- **Claim Extraction**: Document claim verdicts use a keyword heuristic (`verdict_method: keyword_heuristic`).
-- **Live LLM Execution**: Live Gemini tool-calling is NOT RUN (429 quota limit exceeded).
-- **Docker Deployment**: Docker build is NOT RUN (Docker daemon unavailable).
+Bounded PDF parsing and rate limits: PDF byte size, page count, text length, request sizes, and per-IP request rate are capped.
 
----
+Optional Groq text analysis: set GROQ_API_KEY to enable text-only analysis through the OpenAI-compatible Groq API. This adapter does not generate live tool calls.
 
-## System Architecture
+Important implementation boundaries
 
-```
-[ User Prompt / PDF Document ] 
-           │
-           ▼
- [ RAG & Document Pipeline ] ──► [ PromptInjectionDetector ]
-           │                                 │
-           ▼ (Taint Tagging)                 ▼
-  [ Research Agent / Gemini LLM ] ◄── [ SessionContext ]
-           │
-           ▼ (Tool Call Attempt)
-  [ AgentGuard Interceptor ] ──► [ policy.yaml ]
-           │
- ┌─────────┼─────────┐
- ▼         ▼         ▼
-ALLOW   REVIEW    BLOCK
- │         │         │
- ▼         ▼         ▼
-Tool    SQLite    Prevent
-Run     Queue    Execution
-```
+export_customer_data and send_email are mock tools. No real customer database is connected and no real email is sent. An allowed result is labelled MOCK EXECUTION.
 
-> **Note**: Document claim verdicts are derived via a `keyword_heuristic` matching engine in `backend/rag_engine.py`.
+search_academic_db attempts the public arXiv API. If it cannot retrieve results, the response explicitly says MOCK DATA ONLY; it does not invent realistic-looking citations.
 
----
+Claim extraction is document-only. It is not independent research verification and does not use a trusted vector database or external evidence corpus yet. Extracted claims remain NOT_ENOUGH_EVIDENCE until that evidence retrieval is implemented.
 
-## Quick Start Guide
+The prompt-injection detector is heuristic. It can have false positives and false negatives; it is one defense layer, not a guarantee that all prompt injection is prevented.
 
-### Prerequisites
-- Python 3.10+
-- Node.js 18+
+This is a local/demo MVP, not an isolated production sandbox. Tools execute in the backend process, so do not connect real data or real outbound actions without additional authentication, isolation, monitoring, and deployment hardening.
 
-### Setup & Execution
+Project structure
 
-1. **Environment Configuration**:
-   ```bash
-   cp .env.example .env
-   ```
-   Edit `.env` and set your `GEMINI_API_KEY`.
+AgentGuard/
+├── backend/
+│   ├── main.py                 # FastAPI endpoints, input limits, audit workflow
+│   ├── agent_logic.py          # Data models, guarded tools, scripted scenarios
+│   ├── detectors.py            # Prompt-injection and sensitive-data heuristics
+│   ├── rag_engine.py           # Bounded PDF/text ingestion and claim extraction
+│   ├── mcp_gateway.py          # Policy engine and human approval enforcement
+│   ├── database.py             # SQLite audit and approval persistence
+│   ├── policy.yaml             # Risk levels and allowlists
+│   └── samples/                # Sample PDFs for the demo
+├── frontend/
+│   ├── src/app/page.tsx        # Dashboard and interactive scenarios
+│   └── src/app/api/approve/    # Server-side approval proxy (keeps token out of browser)
+├── tests/test_agent_guard.py
+├── evaluate.py
+├── .env.example
+├── Dockerfile
+└── docker-compose.yml
 
-2. **Backend Execution**:
-   ```bash
-   pip install -r backend/requirements.txt
-   uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
-   ```
+Run locally (Windows PowerShell)
 
-3. **Frontend Execution**:
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
-   Open `http://localhost:3000` in your browser.
+Use Python 3.11+ and Node.js 20+.
 
-4. **Docker Execution (Optional Container Build)**:
-   ```bash
-   docker-compose up --build
-   ```
+1. Configure the backend
 
----
+From the repository root:
 
-## Test & Evaluation Suite
+Copy-Item .env.example .env
 
-Run the unit test suite:
-```bash
+Edit .env. Set REVIEWER_TOKEN to a random value of at least 32 characters; the example placeholder is deliberately rejected by the API. Copy the same value into frontend/.env.local. GROQ_API_KEY is optional; without it, the project runs in local fallback mode.
+
+To generate a strong token in PowerShell, run:
+
+$bytes = New-Object byte[] 32
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+$token = [Convert]::ToBase64String($bytes)
+$rng.Dispose()
+$token
+
+Paste the printed token into both environment files. Do not commit either real .env file.
+
+2. Start FastAPI
+
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r backend/requirements.txt
+python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+
+Health check: http://127.0.0.1:8000/health
+API docs: http://127.0.0.1:8000/docs
+
+3. Start Next.js
+
+In a second terminal:
+
+Copy-Item frontend/.env.local.example frontend/.env.local
+Set-Location frontend
+npm ci
+npm run dev
+
+Open http://localhost:3000. Confirm that REVIEWER_TOKEN in frontend/.env.local matches the backend token. The reviewer token is read by the Next.js server-side route and is not embedded in browser code.
+
+Test the backend
+
+From the repository root, with the virtual environment active:
+
 python -m pytest tests/test_agent_guard.py -v
-```
-
-Run the attack corpus benchmark:
-```bash
 python evaluate.py
-```
 
----
+The evaluation script uses a small, hand-built corpus. Its results are not a held-out security benchmark and must not be described as a general detection guarantee.
 
-## Known Limitations & Security Posture
+Optional Docker Compose
 
-- **Single-Process Scope**: AgentGuard runs as a Python class wrapper within the agent process, not as an isolated container sandbox.
-- **Novel Obfuscation**: Highly sophisticated or previously unknown prompt obfuscations may bypass pattern heuristics; AgentGuard mitigates this by enforcing strict taint-based control flow policies.
-- **Allowed Tools & Destinations**: Requests targeting allowlisted email domains or safe tools pass security checks by design; granular data loss prevention policies should complement transport safety.
-- **Model-Level Jailbreaks**: Model alignment failures are handled in-process by the AgentGuard policy interceptor.
+Create .env from .env.example and set REVIEWER_TOKEN.
+
+Run:
+
+docker compose up --build
+
+The app should be available at http://localhost:3000, with FastAPI at http://localhost:8000. Docker deployment should be tested in the target environment before a live demo.
+
+Main API routes
+
+Method
+
+Route
+
+Purpose
+
+GET
+
+/health
+
+Basic health and configuration status
+
+POST
+
+/api/analyze
+
+Analyze text or run a scripted demo scenario
+
+POST
+
+/api/upload_and_analyze
+
+Upload and inspect a PDF
+
+GET
+
+/api/pending_approvals
+
+List pending approvals; reviewer token required
+
+POST
+
+/api/approve
+
+Approve/reject an action; reviewer token required
+
+GET
+
+/api/audit_logs
+
+Read audit records; reviewer token required
+
+Demo storyline
+
+Indirect prompt injection: choose the malicious preset. AgentGuard blocks the scripted action because the source is untrusted and injection is flagged.
+
+Safe academic search: choose the academic search preset. The read-only search action is evaluated as LOW risk.
+
+Human approval: choose the user export preset. The critical action enters REVIEW; approve it to run the mock tool through the hash-verified, guarded path, or reject it to prevent execution.
+
+Every demo label should make the distinction between scripted simulation, LLM text analysis, and mock tool execution clear.
